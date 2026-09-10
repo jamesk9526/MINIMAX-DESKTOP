@@ -19,6 +19,19 @@ function previewBlob(base64: string, mime: string) {
   return new Blob([bytes], { type: mime })
 }
 
+function binaryPreviewImage(data: ArrayBuffer) {
+  const bytes = new Uint8Array(data)
+  // ComfyUI's normal sampler frame starts after its 8-byte envelope. KJNodes'
+  // LTX override adds frame and node metadata before the JPEG, so identify the
+  // image itself instead of assuming one particular envelope length.
+  for (let offset = 0; offset <= Math.min(64, bytes.length - 2); offset += 1) {
+    if (bytes[offset] === 0xff && bytes[offset + 1] === 0xd8) return { offset, mime: 'image/jpeg' }
+    if (offset <= bytes.length - 8 && bytes[offset] === 0x89 && bytes[offset + 1] === 0x50 && bytes[offset + 2] === 0x4e && bytes[offset + 3] === 0x47) return { offset, mime: 'image/png' }
+    if (offset <= bytes.length - 12 && bytes[offset] === 0x52 && bytes[offset + 1] === 0x49 && bytes[offset + 2] === 0x46 && bytes[offset + 3] === 0x46 && bytes[offset + 8] === 0x57 && bytes[offset + 9] === 0x45 && bytes[offset + 10] === 0x42 && bytes[offset + 11] === 0x50) return { offset, mime: 'image/webp' }
+  }
+  return null
+}
+
 export function useLivePreview(url: string | undefined, enabled: boolean, onProgress: (id: string, update: LiveProgress) => void) {
   const [clientId] = useState(createId)
   const [preview, setPreview] = useState<LivePreview | null>(null)
@@ -43,7 +56,7 @@ export function useLivePreview(url: string | undefined, enabled: boolean, onProg
       socket.onopen = () => setConnected(true)
       socket.onerror = () => setConnected(false)
       socket.onclose = () => { setConnected(false); if (!stopped) timer = setTimeout(connect, 3000) }
-      socket.onmessage = (event) => {
+      socket.onmessage = async (event) => {
         if (typeof event.data === 'string') {
           let msg: { type: string; data: { prompt_id?: string; node?: string | null; value?: number; max?: number; image?: string; mime?: string; fps?: number; step?: number; total?: number; output?: { images?: Array<{ filename: string; subfolder?: string; type?: string }> } } }
           try { msg = JSON.parse(event.data) } catch { return }
@@ -83,14 +96,16 @@ export function useLivePreview(url: string | undefined, enabled: boolean, onProg
             const upstream = `${url.replace(/\/+$/, '')}/view?${query}`
             replacePreview({ promptId: msg.data.prompt_id ?? active, url: `minimax-media://comfy?url=${encodeURIComponent(upstream)}`, mime: 'image/jpeg', animated: false })
           }
-        } else if (event.data instanceof ArrayBuffer && event.data.byteLength > 8 && active) {
-          const header = new DataView(event.data)
+        } else {
+          const promptId = active
+          const binary = event.data instanceof ArrayBuffer ? event.data : event.data instanceof Blob ? await event.data.arrayBuffer() : null
+          if (!binary || binary.byteLength <= 8 || !promptId) return
+          const header = new DataView(binary)
           if (header.getUint32(0) !== 1) return
-          const animatedH3Frame = event.data.byteLength > 32 && header.getUint32(4) === 1 && header.getUint32(8) === 1 && header.getUint16(32) === 0xffd8
-          const imageOffset = animatedH3Frame ? 32 : 8
-          const mime = !animatedH3Frame && header.getUint32(4) === 2 ? 'image/png' : 'image/jpeg'
-          const nextUrl = URL.createObjectURL(new Blob([event.data.slice(imageOffset)], { type: mime }))
-          replacePreview({ promptId: active, url: nextUrl, mime, animated: false })
+          const image = binaryPreviewImage(binary)
+          if (!image) return
+          const nextUrl = URL.createObjectURL(new Blob([binary.slice(image.offset)], { type: image.mime }))
+          replacePreview({ promptId, url: nextUrl, mime: image.mime, animated: image.mime === 'image/webp' })
         }
       }
     }

@@ -53,16 +53,22 @@ export function buildLtx25Workflow(
     // the text conditioning and video latent with slot-aware reference tokens.
     prompt['47'] = { class_type: 'ComfyUILTX25MSRICLoRALoader', inputs: { model: modelLink, lora_name: options.msr.loraName, strength_model: 1 } }
     modelLink = ['47', 0]
-    const guideInputs: Record<string, string | number | boolean | Link> = { positive: ['5', 0], negative: ['6', 0], vae: ['3', 0], latent: ['8', 0], strength: 1, reference_frames: '33', use_tiled_encode: false, tile_size: 256, tile_overlap: 64, msr_parameters: ['47', 1] }
     const slots = ['pic1', 'pic2', 'pic3', 'pic4', 'background']
     msrReferences.slice(0, 5).forEach((file, index) => {
       const id = String(50 + index)
       prompt[id] = { class_type: 'LoadImage', inputs: { image: uploadedName(file) } }
-      guideInputs[slots[index]] = [id, 0]
     })
-    prompt['48'] = { class_type: 'ComfyUILTX25MSRMultiReferenceGuide', inputs: guideInputs }
-    prompt['7'].inputs = { positive: ['48', 0], negative: ['48', 1], frame_rate: 24 }
-    initialVideo = ['48', 2]
+    // Turbo samples at its final size, but Quality begins at half size. Licon's
+    // own two-stage workflow attaches MSR guides only after its latent x2 pass;
+    // otherwise the guide-token grid and the sampled latent have different
+    // spatial token counts (the exact ComfyUI error this prevents).
+    if (!quality) {
+      const guideInputs: Record<string, string | number | boolean | Link> = { positive: ['5', 0], negative: ['6', 0], vae: ['3', 0], latent: ['8', 0], strength: 1, reference_frames: '33', use_tiled_encode: false, tile_size: 256, tile_overlap: 64, msr_parameters: ['47', 1] }
+      msrReferences.slice(0, 5).forEach((_, index) => { guideInputs[slots[index]] = [String(50 + index), 0] })
+      prompt['48'] = { class_type: 'ComfyUILTX25MSRMultiReferenceGuide', inputs: guideInputs }
+      prompt['7'].inputs = { positive: ['48', 0], negative: ['48', 1], frame_rate: 24 }
+      initialVideo = ['48', 2]
+    }
   }
   prompt['12'].inputs.model = modelLink
   if (options.previewOverride) {
@@ -97,13 +103,23 @@ export function buildLtx25Workflow(
     prompt['30'] = { class_type: 'LatentUpscaleModelLoader', inputs: { model_name: models.latentUpscaler } }
     prompt['31'] = { class_type: 'LTXVLatentUpsampler', inputs: { samples: finalVideo, upscale_model: ['30', 0], vae: ['3', 0] } }
     let refinedVideo: Link = ['31', 0]
+    let refinementConditioning: Link = ['7', 0]
+    if (options.msr && msrReferences.length) {
+      const slots = ['pic1', 'pic2', 'pic3', 'pic4', 'background']
+      const guideInputs: Record<string, string | number | boolean | Link> = { positive: ['5', 0], negative: ['6', 0], vae: ['3', 0], latent: refinedVideo, strength: 1, reference_frames: '33', use_tiled_encode: false, tile_size: 256, tile_overlap: 64, msr_parameters: ['47', 1] }
+      msrReferences.slice(0, 5).forEach((_, index) => { guideInputs[slots[index]] = [String(50 + index), 0] })
+      prompt['48'] = { class_type: 'ComfyUILTX25MSRMultiReferenceGuide', inputs: guideInputs }
+      prompt['49'] = { class_type: 'LTXVConditioning', inputs: { positive: ['48', 0], negative: ['48', 1], frame_rate: 24 } }
+      refinedVideo = ['48', 2]
+      refinementConditioning = ['49', 0]
+    }
     if (preparedImage) {
       prompt['32'] = { class_type: 'LTXVImgToVideoInplace', inputs: { vae: ['3', 0], image: preparedImage, latent: refinedVideo, strength: 1, bypass: false } }
       refinedVideo = ['32', 0]
     }
     prompt['33'] = { class_type: 'LTXVConcatAVLatent', inputs: { video_latent: refinedVideo, audio_latent: finalAudio } }
     prompt['34'] = { class_type: 'RandomNoise', inputs: { noise_seed: 42 } }
-    prompt['35'] = { class_type: 'LTXVDualCFGGuider', inputs: { model: modelLink, positive: ['7', 0], negative: ['7', 1], video_cfg: 1, audio_cfg: 1 } }
+    prompt['35'] = { class_type: 'LTXVDualCFGGuider', inputs: { model: modelLink, positive: refinementConditioning, negative: refinementConditioning[0] === '49' ? ['49', 1] : ['7', 1], video_cfg: 1, audio_cfg: 1 } }
     prompt['36'] = { class_type: 'KSamplerSelect', inputs: { sampler_name: 'euler_ancestral' } }
     prompt['37'] = { class_type: 'ManualSigmas', inputs: { sigmas: LTX25_REFINER_SIGMAS } }
     prompt['38'] = { class_type: 'SamplerCustomAdvanced', inputs: { noise: ['34', 0], guider: ['35', 0], sampler: ['36', 0], sigmas: ['37', 0], latent_image: ['33', 0] } }
