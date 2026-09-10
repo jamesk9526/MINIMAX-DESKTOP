@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { AlertCircle, Check, CircleStop, Dices, Gauge, ImagePlus, LoaderCircle, Sparkles, WandSparkles } from 'lucide-react'
+import { AlertCircle, Check, CircleStop, Dices, Film, Gauge, ImagePlus, LoaderCircle, Sparkles, WandSparkles } from 'lucide-react'
 import { buildZImage, type ZImageVariant } from '../lib/zimage'
 import { choices, type ObjectInfo } from '../lib/comfyInfo'
 import { RenderSize } from './RenderSize'
@@ -46,7 +46,7 @@ const preferredModel = (models: string[], variant: ZImageVariant) => models.find
   ?? (variant === 'turbo' ? 'z_image_turbo_bf16.safetensors' : 'z_image_bf16.safetensors')
 
 export function ZImageWorkspace({
-  url, info, connected, ollamaAvailable, llmProvider, ollamaUrl, ollamaModel, outputDirectory, onUse,
+  url, info, connected, ollamaAvailable, llmProvider, ollamaUrl, ollamaModel, outputDirectory, onUse, onUseLtx,
 }: {
   url: string
   info: ObjectInfo
@@ -57,6 +57,7 @@ export function ZImageWorkspace({
   ollamaModel: string
   outputDirectory: string
   onUse(file: MediaFile, resolution: string): void
+  onUseLtx(file: MediaFile): void
 }) {
   const initial = useMemo(readWorkspace, [])
   const [prompt, setPrompt] = useState(initial.prompt)
@@ -213,7 +214,7 @@ export function ZImageWorkspace({
       <aside className="zimage-preview-panel">
         <div className="panel-heading"><div><span>OUTPUT</span><strong>Image preview</strong></div>{result && <span className="zimage-complete"><Check size={13} />Ready</span>}</div>
         <div className="zimage-preview-stage">{result?.preview ? <img src={result.preview} alt="Generated Z-Image output" /> : busy ? <div className="render-state"><LoaderCircle className="spin" /><strong>Creating your image</strong><span>{resolution.replace('x', ' × ')}</span></div> : <div className="empty-preview"><div className="preview-icon"><ImagePlus size={28} /></div><strong>Your image will appear here</strong><span>Describe the still, select a canvas, and generate it locally.</span></div>}</div>
-        <div className="zimage-preview-actions"><span>{result ? `${result.name} · ${resolution.replace('x', ' × ')}` : 'Saved to ComfyUI · MiniMax_first_frames'}</span><button className="primary-button" disabled={!result} onClick={() => result && onUse(result, resolution)}><ImagePlus size={16} />Use in MiniMax I2V</button></div>
+        <div className="zimage-preview-actions"><span>{result ? `${result.name} · ${resolution.replace('x', ' × ')}` : 'Saved to ComfyUI · MiniMax_first_frames'}</span><div><button className="secondary-button" disabled={!result} onClick={() => result && onUse(result, resolution)}><ImagePlus size={16} />MiniMax I2V</button><button className="primary-button" disabled={!result} onClick={() => result && onUseLtx(result)} title="Loads an identity-preserving LTX image-to-video prompt"><Film size={16} />Send to LTX 2.5</button></div></div>
       </aside>
     </div>
   </div>

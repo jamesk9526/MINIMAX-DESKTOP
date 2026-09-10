@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld('minimax', {
   getSettings: () => ipcRenderer.invoke('settings:get'),
   getGpuTelemetry: () => ipcRenderer.invoke('system:gpu-telemetry'),
   saveSettings: (settings: unknown) => ipcRenderer.invoke('settings:save', settings),
+  setUiScale: (scale: number) => ipcRenderer.invoke('window:set-ui-scale', scale),
   chooseDirectory: (initialPath?: string) => ipcRenderer.invoke('dialog:directory', initialPath),
   chooseMedia: (type: 'image' | 'video' | 'audio') => ipcRenderer.invoke('dialog:media', type),
   scanModels: (settings: unknown) => ipcRenderer.invoke('models:scan', settings),

@@ -43,6 +43,8 @@ export type AppSettings = {
   paths: Record<ModelKind, string>
   outputDirectory: string
   ffmpegPath: string
+  uiScale: number
+  experimentalLtxMsrEnabled: boolean
   characterDetailReferencesEnabled: boolean
   renderSettingsPresets: RenderSettingsPreset[]
   generationDefaults: GenerationDefaults
@@ -188,6 +190,8 @@ export type Ltx25GenerationOptions = {
   loraStrength?: number
   seed: number
   preset: 'quality' | 'turbo'
+  previewOverride?: { nodeType: string; fps: number }
+  msr?: { loraName: string; references: string[] }
   filenamePrefix: string
 }
 
@@ -330,6 +334,7 @@ export type DesktopApi = {
   getSettings(): Promise<AppSettings>
   getGpuTelemetry(): Promise<GpuTelemetry>
   saveSettings(settings: AppSettings): Promise<AppSettings>
+  setUiScale(scale: number): Promise<number>
   chooseDirectory(initialPath?: string): Promise<string | null>
   chooseMedia(type: MediaKind): Promise<{ path: string; name: string } | null>
   scanModels(settings: AppSettings): Promise<ModelFile[]>

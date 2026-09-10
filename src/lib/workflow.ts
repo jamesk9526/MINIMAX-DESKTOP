@@ -58,9 +58,9 @@ export function buildMiniMaxWorkflow(
     modelLink = ['5', 0]
   }
   // User-selected adapters are intentionally loaded after the official Turbo
-  // adapter. This keeps Turbo automatic and allows up to two additional
+  // adapter. This keeps Turbo automatic and allows up to three additional
   // ComfyUI LoRAs without treating the Turbo file as a manual slot.
-  options.userLoras?.filter((lora) => lora.name.trim()).slice(0, 2).forEach((lora, index) => {
+  options.userLoras?.filter((lora) => lora.name.trim()).slice(0, 3).forEach((lora, index) => {
     const id = `${90 + index}`
     prompt[id] = { class_type: 'LoraLoaderModelOnly', inputs: { model: modelLink, lora_name: lora.name, strength_model: lora.strength } }
     modelLink = [id, 0]

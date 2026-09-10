@@ -42,6 +42,8 @@ type AppSettings = {
   paths: Record<ModelKind, string>
   outputDirectory: string
   ffmpegPath: string
+  uiScale: number
+  experimentalLtxMsrEnabled: boolean
   characterDetailReferencesEnabled: boolean
   renderSettingsPresets: RenderSettingsPreset[]
   generationDefaults: GenerationDefaults
@@ -149,6 +151,8 @@ function defaultSettings(): AppSettings {
     paths: Object.fromEntries(modelKinds.map((kind) => [kind, join(root, kind)])) as Record<ModelKind, string>,
     outputDirectory: join(app.getPath('documents'), 'ComfyUI', 'output'),
     ffmpegPath: existsSync('C:\\FFMPEG\\bin\\ffmpeg.exe') ? 'C:\\FFMPEG\\bin\\ffmpeg.exe' : 'ffmpeg',
+    uiScale: 100,
+    experimentalLtxMsrEnabled: false,
     characterDetailReferencesEnabled: false,
     renderSettingsPresets: [],
     generationDefaults: {
@@ -235,8 +239,9 @@ async function loadSettings(): Promise<AppSettings> {
     generationDefaults.steps = Math.max(4, Math.min(30, Number(generationDefaults.steps) || 30))
     generationDefaults.textEncoderPreference = raw.generationDefaults?.textEncoderPreference === 'quality' ? 'quality' : 'fast'
     generationDefaults.turbo8Profile = raw.generationDefaults?.turbo8Profile === 'stable' || raw.generationDefaults?.turbo8Profile === 'motion' ? raw.generationDefaults.turbo8Profile : 'balanced'
+    const uiScale = Math.max(75, Math.min(150, Number(raw.uiScale) || defaults.uiScale))
     const renderSettingsPresets = Array.isArray(raw.renderSettingsPresets) ? raw.renderSettingsPresets.filter((preset) => preset && typeof preset.name === 'string' && preset.name.trim()).slice(0, 30).map((preset) => ({ id: typeof preset.id === 'string' ? preset.id : randomUUID(), name: preset.name.trim().slice(0, 60), values: { ...generationDefaults, ...(preset.values ?? {}) }, createdAt: Number(preset.createdAt) || Date.now(), updatedAt: Number(preset.updatedAt) || Date.now() })) : []
-    return { ...defaults, ...raw, llmProvider: raw.llmProvider === 'lmstudio' ? 'lmstudio' : 'ollama', characterDetailReferencesEnabled: raw.characterDetailReferencesEnabled === true, renderSettingsPresets, paths: { ...defaults.paths, ...raw.paths }, generationDefaults }
+    return { ...defaults, ...raw, uiScale, experimentalLtxMsrEnabled: raw.experimentalLtxMsrEnabled === true, llmProvider: raw.llmProvider === 'lmstudio' ? 'lmstudio' : 'ollama', characterDetailReferencesEnabled: raw.characterDetailReferencesEnabled === true, renderSettingsPresets, paths: { ...defaults.paths, ...raw.paths }, generationDefaults }
   } catch {
     return defaultSettings()
   }
@@ -584,6 +589,7 @@ function createWindow() {
     },
   })
   window.setMenuBarVisibility(false)
+  void loadSettings().then((settings) => window.webContents.setZoomFactor(settings.uiScale / 100))
   window.webContents.setWindowOpenHandler(({ url }) => {
     if (url !== 'about:blank') return { action: 'deny' }
     return {
@@ -662,6 +668,12 @@ app.whenReady().then(async () => {
     return lanStatus
   })
   ipcMain.handle('settings:save', (_event, settings: AppSettings) => saveSettings(settings))
+  ipcMain.handle('window:set-ui-scale', (event, scale: number) => {
+    const target = BrowserWindow.fromWebContents(event.sender)
+    const value = Math.max(0.75, Math.min(1.5, Number(scale) || 1))
+    target?.webContents.setZoomFactor(value)
+    return Math.round(value * 100)
+  })
   ipcMain.handle('dialog:directory', async (_event, initialPath?: string) => {
     const result = await dialog.showOpenDialog({
       defaultPath: initialPath && existsSync(initialPath) ? initialPath : undefined,

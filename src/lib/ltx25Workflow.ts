@@ -18,6 +18,7 @@ export function buildLtx25Workflow(
   options: Ltx25GenerationOptions,
   models: Ltx25ModelSelection,
   firstFrame?: UploadedFile,
+  msrReferences: UploadedFile[] = [],
 ): ComfyPrompt {
   const frames = ltx25FrameCount(options.duration)
   const quality = options.preset === 'quality'
@@ -41,7 +42,38 @@ export function buildLtx25Workflow(
     '14': { class_type: 'ManualSigmas', inputs: { sigmas: LTX25_FIRST_STAGE_SIGMAS } },
   }
 
+  // KJNodes' LTX2SamplingPreviewOverride wraps the model before either stage's
+  // guider. The supplied LTX 2.5 DEV workflow connects the video VAE here and
+  // leaves the optional latent-upscale-model socket empty; retaining that
+  // wiring avoids a current DynamicVRAM ModelPatcher compatibility failure.
+  let modelLink: Link = ['1', 0]
   let initialVideo: Link = ['8', 0]
+  if (options.msr && msrReferences.length) {
+    // Licon MSR's loader must precede both LTX guiders; its guide then replaces
+    // the text conditioning and video latent with slot-aware reference tokens.
+    prompt['47'] = { class_type: 'ComfyUILTX25MSRICLoRALoader', inputs: { model: modelLink, lora_name: options.msr.loraName, strength_model: 1 } }
+    modelLink = ['47', 0]
+    const guideInputs: Record<string, string | number | boolean | Link> = { positive: ['5', 0], negative: ['6', 0], vae: ['3', 0], latent: ['8', 0], strength: 1, reference_frames: '33', use_tiled_encode: false, tile_size: 256, tile_overlap: 64, msr_parameters: ['47', 1] }
+    const slots = ['pic1', 'pic2', 'pic3', 'pic4', 'background']
+    msrReferences.slice(0, 5).forEach((file, index) => {
+      const id = String(50 + index)
+      prompt[id] = { class_type: 'LoadImage', inputs: { image: uploadedName(file) } }
+      guideInputs[slots[index]] = [id, 0]
+    })
+    prompt['48'] = { class_type: 'ComfyUILTX25MSRMultiReferenceGuide', inputs: guideInputs }
+    prompt['7'].inputs = { positive: ['48', 0], negative: ['48', 1], frame_rate: 24 }
+    initialVideo = ['48', 2]
+  }
+  prompt['12'].inputs.model = modelLink
+  if (options.previewOverride) {
+    prompt['46'] = {
+      class_type: options.previewOverride.nodeType,
+      inputs: { model: modelLink, preview_rate: options.previewOverride.fps, vae: ['3', 0] },
+    }
+    modelLink = ['46', 0]
+    prompt['12'].inputs.model = modelLink
+  }
+
   let preparedImage: Link | undefined
   if (options.mode === 'image' && firstFrame) {
     prompt['20'] = { class_type: 'LoadImage', inputs: { image: uploadedName(firstFrame) } }
@@ -71,7 +103,7 @@ export function buildLtx25Workflow(
     }
     prompt['33'] = { class_type: 'LTXVConcatAVLatent', inputs: { video_latent: refinedVideo, audio_latent: finalAudio } }
     prompt['34'] = { class_type: 'RandomNoise', inputs: { noise_seed: 42 } }
-    prompt['35'] = { class_type: 'LTXVDualCFGGuider', inputs: { model: ['1', 0], positive: ['7', 0], negative: ['7', 1], video_cfg: 1, audio_cfg: 1 } }
+    prompt['35'] = { class_type: 'LTXVDualCFGGuider', inputs: { model: modelLink, positive: ['7', 0], negative: ['7', 1], video_cfg: 1, audio_cfg: 1 } }
     prompt['36'] = { class_type: 'KSamplerSelect', inputs: { sampler_name: 'euler_ancestral' } }
     prompt['37'] = { class_type: 'ManualSigmas', inputs: { sigmas: LTX25_REFINER_SIGMAS } }
     prompt['38'] = { class_type: 'SamplerCustomAdvanced', inputs: { noise: ['34', 0], guider: ['35', 0], sampler: ['36', 0], sigmas: ['37', 0], latent_image: ['33', 0] } }

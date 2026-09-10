@@ -19,6 +19,8 @@ const settings: AppSettings = {
   },
   outputDirectory: 'C:\\Users\\James\\Documents\\ComfyUI\\output',
   ffmpegPath: 'C:\\FFMPEG\\bin\\ffmpeg.exe',
+  uiScale: 100,
+  experimentalLtxMsrEnabled: false,
   characterDetailReferencesEnabled: false,
   renderSettingsPresets: [],
   generationDefaults: {
@@ -64,6 +66,7 @@ export function installBrowserMock() {
   const api: DesktopApi = {
     getObjectInfo: async () => Object.fromEntries([
       ...ltxNodes.map((name) => [name, { input: { required: {} } }]),
+      ['LTX2SamplingPreviewOverride', { input: { required: {} } }],
       ...aceNodes.map((name) => [name, { input: { required: {} } }]),
       ['LatentUpscaleModelLoader', { input: { required: { model_name: ['COMBO', { options: ['ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors'] }] } } }],
       ['UNETLoader', { input: { required: { unet_name: ['COMBO', { options: ['z_image_turbo_bf16.safetensors', 'z_image_bf16.safetensors', 'acestep_v1.5_xl_sft_bf16.safetensors', 'acestep_v1.5_xl_base_bf16.safetensors'] }] } } }],
@@ -78,6 +81,7 @@ export function installBrowserMock() {
     getSettings: async () => current,
     getGpuTelemetry: async () => ({ available: true, name: 'Preview GPU', usagePercent: 38, vramPercent: 62, vramUsedMb: 14880, vramTotalMb: 24000 }),
     saveSettings: async (next) => (current = next),
+    setUiScale: async (scale) => Math.round(Math.max(.75, Math.min(1.5, scale)) * 100),
     chooseDirectory: async () => null,
     chooseMedia: async () => null,
     scanModels: async () => examples.map(([kind, name, bytes]) => ({ kind, name, bytes, path: `${current.paths[kind]}\\${name}` })),
