@@ -1,6 +1,6 @@
 {
   "name": "minimax-desktop",
-  "version": "0.12.8",
+  "version": "0.12.12",
   "private": true,
   "description": "Local-first MiniMax H3 desktop studio powered by ComfyUI",
   "author": "James",

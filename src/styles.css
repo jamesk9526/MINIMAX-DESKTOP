@@ -486,6 +486,24 @@ textarea::placeholder, input::placeholder { color: #58615c; }
 .prompt-system-chip[open] { width: 100%; padding: 8px; border: 1px solid rgba(195,255,74,.2); border-radius: 8px; background: rgba(195,255,74,.045); }
 .prompt-system-chip[open] summary { margin-bottom: 7px; }
 .prompt-system-chip p { margin: 0; color: var(--muted); font-size: 8px; line-height: 1.5; white-space: pre-wrap; }
+.ltx-msr-control { display: grid; gap: 9px; margin: 14px 16px 0; padding: 11px; border: 1px solid rgba(240,184,92,.28); border-radius: 9px; background: rgba(240,184,92,.045); }
+.ltx-msr-control.ready { border-color: rgba(195,255,74,.28); background: rgba(195,255,74,.045); }
+.ltx-msr-control header, .ltx-msr-control header > span { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.ltx-msr-control header > span > span { display: grid; gap: 1px; }
+.ltx-msr-control header svg { color: var(--warning); }
+.ltx-msr-control.ready header svg { color: var(--accent); }
+.ltx-msr-control header small { color: var(--muted-2); font-size: 7px; letter-spacing: .11em; }
+.ltx-msr-control header strong { font-size: 10px; }
+.ltx-msr-control header em { margin-left: auto; color: var(--warning); font-size: 8px; font-style: normal; font-weight: 750; }
+.ltx-msr-control.ready header em { color: var(--accent); }
+.ltx-msr-control > label { display: grid; gap: 5px; color: var(--muted); font-size: 8px; }
+.ltx-msr-control select { width: 100%; }
+.ltx-msr-reference-list { display: grid; gap: 5px; }
+.ltx-msr-reference-list span { display: grid; grid-template-columns: 48px minmax(0, 1fr); gap: 7px; min-width: 0; color: var(--muted); font-size: 8px; overflow-wrap: anywhere; }
+.ltx-msr-reference-list b { color: var(--accent); font-size: 7px; }
+.ltx-msr-control p { margin: 0; color: var(--muted); font-size: 8px; line-height: 1.45; }
+.ltx-msr-manual-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; margin: 9px 16px 0; }
+.ltx-msr-manual-actions small { flex: 1 1 180px; color: var(--muted); font-size: 8px; line-height: 1.4; }
 .reference-direction-actions { padding-top: 7px; border-top: 1px solid var(--line); }
 .smart-prompt-editor { position: relative; min-width: 0; }
 .smart-prompt-editor > textarea { display: block; }

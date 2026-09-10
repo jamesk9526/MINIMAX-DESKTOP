@@ -1195,13 +1195,16 @@ function App() {
 
   const sendGeneratedStillToLtx = async (file: MediaFile) => {
     let handoffPrompt = buildLtxImageHandoffPrompt()
+    const msrReferences = settings?.experimentalLtxMsrEnabled
+      ? [...selectedReferenceCharacterIds.flatMap((id) => { const character = characterProjects.find((item) => item.id === id); return character ? characterReferences(character, settings.characterDetailReferencesEnabled) : [] }), ...selectedReferenceLocationIds.flatMap((id) => { const location = locationProjects.find((item) => item.id === id); return location ? locationReferences(location) : [] })].filter((reference, index, all) => all.findIndex((item) => item.path === reference.path) === index).slice(0, 5)
+      : []
     const llm = settings ? resolveLlmConnection(settings) : null
     if (llm?.model.trim() && ollamaModels.length) {
       setNotice({ tone: 'neutral', text: 'Inspecting the generated still locally to ground the LTX identity prompt…' })
       try {
         const description = await window.minimax.generateWithOllamaVision(llm.url, llm.model, 'Inspect this generated still and return one concise visible-reference grounding paragraph for an image-to-video prompt. Describe only stable visible details: number of people or subjects, non-sensitive facial geometry and expression, hairstyle, clothing and accessories, body pose, environment, objects, composition, lighting, and color treatment. Do not identify people, infer ethnicity, age, health, personality, or hidden details. Do not describe motion, sound, camera instructions, quality advice, or any text that is not visibly present. Return plain text only, under 110 words.', [file.path], llm.provider)
         handoffPrompt = appendLtxVisionGrounding(handoffPrompt, description)
-        useStartFrameInLtx(file, handoffPrompt)
+        useStartFrameInLtx(file, handoffPrompt, msrReferences)
         setNotice({ tone: 'success', text: `${file.name} loaded into LTX 2.5 with identity protection and local visual grounding.` })
         return
       } catch {
@@ -1209,9 +1212,6 @@ function App() {
         // with the deterministic image-authority prompt when inspection fails.
       }
     }
-    const msrReferences = settings?.experimentalLtxMsrEnabled
-      ? [...selectedReferenceCharacterIds.flatMap((id) => { const character = characterProjects.find((item) => item.id === id); return character ? characterReferences(character, settings.characterDetailReferencesEnabled) : [] }), ...selectedReferenceLocationIds.flatMap((id) => { const location = locationProjects.find((item) => item.id === id); return location ? locationReferences(location) : [] })].filter((reference, index, all) => all.findIndex((item) => item.path === reference.path) === index).slice(0, 5)
-      : []
     useStartFrameInLtx(file, handoffPrompt, msrReferences)
   }
 
