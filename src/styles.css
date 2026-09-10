@@ -44,6 +44,15 @@
 .user-lora-slot select { min-width: 0; min-height: 38px; padding: 8px; background: var(--surface); color: var(--text); border: 1px solid var(--line-strong); border-radius: 7px; }
 .user-lora-slots .field-help { margin: 0; }
 .render-controls { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.ref2va-setting-group { display: grid; gap: 12px; margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
+.ref2va-setting-heading { display: flex; align-items: flex-start; gap: 9px; }
+.ref2va-setting-heading > span { display: grid; place-items: center; flex: 0 0 auto; width: 22px; height: 22px; border: 1px solid color-mix(in srgb, var(--accent) 48%, var(--line)); border-radius: 50%; color: var(--accent); font-size: 9px; font-weight: 800; }
+.ref2va-setting-heading > div { display: grid; gap: 2px; min-width: 0; }
+.ref2va-setting-heading strong { color: var(--text); font-size: 12px; }
+.ref2va-setting-heading small { color: var(--muted-2); font-size: 10px; line-height: 1.35; }
+.ref2va-adapter-group .user-lora-slots { margin-top: 0; }
+.ref2va-subsection-title { color: #cad2cd; font-size: 10px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
+.ref2va-subsection-title.after-render { margin-top: 4px; padding-top: 12px; border-top: 1px solid var(--line); }
 .render-duration { margin: 4px 0 14px; }
 .render-extras { display: grid; gap: 9px; margin: 15px 0; padding: 12px; border-radius: 9px; background: #0d110f; }
 .render-extras label { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; }
