@@ -1451,17 +1451,36 @@ function App() {
     }
   }
 
-  const addStillAsReference = async (job: GenerationJob) => {
+  const sendStillToI2v = async (job: GenerationJob, provider: 'minimax' | 'ltx25') => {
     if (!job.localOutputPath) {
-      setNotice({ tone: 'error', text: 'The completed still is not available as a local reference file.' })
+      setNotice({ tone: 'error', text: 'The completed still is not available as a local I2V input file.' })
       return
     }
     try {
-      const preview = await window.minimax.mediaUrl(job.localOutputPath)
-      setReferenceImages((current) => current.some((file) => file.path === job.localOutputPath) ? current : current.length < 9 ? [...current, { path: job.localOutputPath!, name: `Ref2VA still · ${new Date(job.createdAt).toLocaleString()}`, kind: 'image', preview }] : current)
-      setMode('reference')
-      setNotice({ tone: 'success', text: 'Reference still added to the current Ref2VA source media.' })
-    } catch (error) { setNotice({ tone: 'error', text: error instanceof Error ? error.message : String(error) }) }
+      const file: MediaFile = {
+        path: job.localOutputPath,
+        name: `Generated still · ${new Date(job.createdAt).toLocaleString()}`,
+        kind: 'image',
+        preview: await window.minimax.mediaUrl(job.localOutputPath),
+      }
+      if (provider === 'ltx25') {
+        useStartFrameInLtx(file)
+        return
+      }
+      setFirstFrame(file)
+      setLastFrame(null)
+      setReferenceImages([])
+      setReferenceVideos([])
+      setReferenceAudios([])
+      setSelectedReferenceCharacterIds([])
+      setSelectedReferenceLocationIds([])
+      setMode('image')
+      setResolution(`${job.width}x${job.height}`)
+      setActiveJobId(null)
+      setNotice({ tone: 'success', text: 'Generated still loaded as the MiniMax I2V starting frame.' })
+    } catch (error) {
+      setNotice({ tone: 'error', text: error instanceof Error ? error.message : String(error) })
+    }
   }
 
   const runH3Diagnostics = async () => {
@@ -1631,7 +1650,7 @@ function App() {
             connected={status.connected}
             onGenerate={() => void generate()}
             onGenerateImage={() => void generate('image')}
-            onUseStillAsReference={(job) => void addStillAsReference(job)}
+            onSendStillToI2v={(job, provider) => void sendStillToI2v(job, provider)}
             latestJob={activeJobId ? jobs.find((job) => job.id === activeJobId) : undefined}
             onCancel={(job) => void cancelJob(job)}
             onContinue={startVideoContinuation}
@@ -1821,7 +1840,7 @@ type CreateViewProps = {
   onPromptTool(tool: 'enhance' | 'timeline' | 'audio'): void
   onGenerateDialogue(draft: CharacterDialogueDraft): Promise<string>
   onUseSuggestion(): void; onDismissSuggestion(): void
-  onGenerate(): void; onGenerateImage(): void; onUseStillAsReference(job: GenerationJob): void; onCancel(job: GenerationJob): void; onContinue(job: GenerationJob): Promise<void>; latestJob?: GenerationJob
+  onGenerate(): void; onGenerateImage(): void; onSendStillToI2v(job: GenerationJob, provider: 'minimax' | 'ltx25'): void; onCancel(job: GenerationJob): void; onContinue(job: GenerationJob): Promise<void>; latestJob?: GenerationJob
 }
 
 function CreateView(props: CreateViewProps) {
@@ -1833,7 +1852,7 @@ function CreateView(props: CreateViewProps) {
     seed, setSeed, advanced, setAdvanced, firstFrame, lastFrame, setFirstFrame, setLastFrame, chooseMedia,
     referenceImages, referenceVideos, referenceAudios, characters, wardrobes, locations, selectedCharacterIds, selectedLocationIds, characterDetailReferencesEnabled, loadCharacter, loadWardrobe, loadLocation, refreshSourceMedia, removeReference, chooseReference, editVideoReference, h3Validated, modelReady, selection,
     submitting, stillSubmitting, cancelling, connected, ollamaAvailable, ollamaModel, llmProviderLabel, promptSuggestion, promptingTool, dialogueGenerating,
-    onPromptTool, onGenerateDialogue, onUseSuggestion, onDismissSuggestion, onGenerate, onGenerateImage, onUseStillAsReference, onCancel, onContinue, latestJob,
+    onPromptTool, onGenerateDialogue, onUseSuggestion, onDismissSuggestion, onGenerate, onGenerateImage, onSendStillToI2v, onCancel, onContinue, latestJob,
   } = props
   const promptRef = useRef<SmartPromptEditorHandle>(null)
   const sourceMediaTriggerRef = useRef<HTMLButtonElement>(null)
@@ -2040,7 +2059,7 @@ function CreateView(props: CreateViewProps) {
             {latestJob?.outputUrl ? latestJob.mediaType === 'image' ? <img className="reference-still-output" src={latestJob.outputUrl} alt="Generated Ref2VA reference still" /> : <VideoPlayer src={latestJob.outputUrl} /> : latestJob && ['queued', 'running'].includes(latestJob.status) ? <div className="render-state constructing"><RenderConstruction /><strong>{latestJob.progressLabel ?? (latestJob.status === 'queued' ? 'Waiting in queue' : latestJob.mediaType === 'image' ? 'Generating one reference still' : 'Rendering locally')}</strong><span>{latestJob.currentStep !== undefined && latestJob.totalSteps ? `Live sampler step ${latestJob.currentStep} of ${latestJob.totalSteps}` : `${latestJob.width} × ${latestJob.height}${latestJob.mediaType === 'image' ? ' · one still' : ` · ${latestJob.duration}s`}`}</span><div className="progress"><i style={{ width: `${latestJob.progress}%` }} /></div><small>{Math.round(latestJob.progress)}% · live ComfyUI status</small></div> : <div className="empty-preview"><div className="preview-icon"><Film size={28} /></div><strong>Your video will appear here</strong><span>Configure a shot, then send it to the local engine.</span></div>}
           </div>
           {latestJob?.mediaType !== 'image' && latestJob?.provider === 'minimax' && latestJob.status === 'completed' && latestJob.outputUrl && <VideoContinuationControls job={latestJob} onContinue={onContinue} />}
-          {latestJob?.mediaType === 'image' && latestJob.status === 'completed' && latestJob.outputUrl && <div className="still-result-actions"><a className="secondary-button" href={latestJob.outputUrl} target="_blank" rel="noreferrer"><ExternalLink size={15} />Open image</a><button className="primary-button" onClick={() => onUseStillAsReference(latestJob)}><ImagePlus size={15} />Use as Reference</button></div>}
+          {latestJob?.mediaType === 'image' && latestJob.status === 'completed' && latestJob.outputUrl && <div className="still-result-actions"><a className="secondary-button" href={latestJob.outputUrl} target="_blank" rel="noreferrer"><ExternalLink size={15} />Open image</a><div className="still-i2v-actions"><span><ImagePlus size={15} />Send to I2V</span><button className="primary-button" onClick={() => onSendStillToI2v(latestJob, 'ltx25')}><Aperture size={15} />LTX 2.5</button><button className="secondary-button" onClick={() => onSendStillToI2v(latestJob, 'minimax')}><Film size={15} />MiniMax I2V</button></div></div>}
           <div className="pipeline-summary">
             <PipelineItem ready={Boolean(mode === 'reference' ? selection.ref2va : selection.fl2va)} label="Diffusion" value={mode === 'reference' ? selection.ref2va : selection.fl2va} />
             <PipelineItem ready={Boolean(selection.textEncoder)} label="Encoder" value={selection.textEncoder} />

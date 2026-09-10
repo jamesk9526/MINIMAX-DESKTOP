@@ -2334,8 +2334,16 @@ textarea::placeholder, input::placeholder { color: #58615c; }
 .preview-generate-bar { position: sticky; z-index: 3; bottom: 0; }
 .reference-still-output { display: block; width: 100%; height: 100%; object-fit: contain; background: #070908; }
 .still-result-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.still-i2v-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; padding-left: 8px; border-left: 1px solid var(--line); }
+.still-i2v-actions > span { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .02em; }
 .generate-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .generation-image-button { white-space: nowrap; }
+
+@media (max-width: 680px) {
+  .still-i2v-actions { width: 100%; padding: 8px 0 0; border-top: 1px solid var(--line); border-left: 0; }
+  .still-i2v-actions > span { flex: 0 0 100%; }
+  .still-i2v-actions .primary-button, .still-i2v-actions .secondary-button { flex: 1 1 140px; }
+}
 
 .wardrobe-accessory-builder { min-width: 0; margin: 15px 0 0; padding: 0; border: 0; border-top: 1px solid var(--line); }
 .wardrobe-accessory-builder > legend { padding: 13px 0 0; color: var(--text); font-size: 10px; font-weight: 700; }

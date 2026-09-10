@@ -201,10 +201,14 @@ export function buildMiniMaxWorkflow(
 }
 
 export function buildMiniMaxReferenceStillWorkflow(options: GenerationOptions, models: ModelSelection, uploads: { images: UploadedFile[]; videos: UploadedFile[]; audios: UploadedFile[] }): ComfyPrompt {
-  // Ref2VA requires a video-shaped latent, so keep its minimum valid frame
-  // batch in memory, select one decoded frame, and save only that image.
-  const prompt = buildMiniMaxWorkflow(options, models, uploads)
+  // Ref2VA requires a video-shaped latent. Five frames is the node's minimum
+  // valid 17k + 5 batch, so never spend a full video render on a still.
+  const prompt = buildMiniMaxWorkflow({ ...options, duration: 5 / 24 }, models, uploads)
   delete prompt['17']; delete prompt['18']; delete prompt['19']; delete prompt['72']
+  // Use the fifth decoded frame as the still. The short Ref2VA sequence gives
+  // the generation room to settle, and the final frame is the requested handoff
+  // image for the later I2V pass.
+  prompt['71'] = { class_type: 'ImageFromBatch', inputs: { image: ['16', 0], batch_index: 4, length: 1 } }
   prompt['73'] = { class_type: 'SaveImage', inputs: { images: ['71', 0], filename_prefix: options.filenamePrefix } }
   return prompt
 }
