@@ -286,6 +286,8 @@ export type GenerationJob = {
   progressLabel?: string
   currentStep?: number
   totalSteps?: number
+  lastSamplerStepAt?: number
+  estimatedSamplerStepMs?: number
   outputUrl?: string
   localOutputPath?: string
   error?: string

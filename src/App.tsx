@@ -183,6 +183,19 @@ function formatRuntime(milliseconds: number) {
   return hours ? `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}` : `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
 }
 
+function formatStepDuration(milliseconds: number) {
+  const seconds = Math.max(0, milliseconds / 1000)
+  return `${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)}s/step`
+}
+
+function samplerProgressSummary(job: GenerationJob | undefined, now: number) {
+  if (!job || job.status !== 'running' || job.currentStep === undefined || !job.totalSteps || job.totalSteps <= 0) return null
+  const progress = Math.min(100, Math.round((job.currentStep / job.totalSteps) * 100))
+  const rate = job.estimatedSamplerStepMs
+  const nextStepIn = rate && job.lastSamplerStepAt ? Math.max(0, rate - (now - job.lastSamplerStepAt)) : undefined
+  return { progress, currentStep: job.currentStep, totalSteps: job.totalSteps, rate, nextStepIn }
+}
+
 function buildCharacterDetailInstructions(characters: CharacterProject[], enabled: boolean) {
   if (!enabled) return []
   return characters.flatMap((character) => (character.detailReferences ?? []).flatMap((detail) => detail.images.length
@@ -339,6 +352,8 @@ function composeH3Prompt(input: {
   clothingPolicy: 'wardrobe' | 'underwear' | 'unrestricted'
   noDialogue: boolean
   naturalMovement: boolean
+  referenceVideoCount?: number
+  referenceAudioCount?: number
 }) {
   const activeBindings = input.clothingPolicy === 'wardrobe' ? input.bindings : input.bindings.filter((binding) => binding.purpose !== 'wardrobe')
   const referenceDirection = composeReferenceInstructions(activeBindings).join(' ')
@@ -361,21 +376,39 @@ function composeH3Prompt(input: {
   if (input.mode === 'reference') {
     const numbered = activeBindings.map((binding, index) => ({ ...binding, number: index + 1 }))
     const subjectLines: string[] = []
+    const retentionLines: string[] = []
     const characters = new Map<string, typeof numbered>()
     for (const binding of numbered.filter((binding) => binding.characterId)) characters.set(binding.characterId!, [...(characters.get(binding.characterId!) ?? []), binding])
     let subjectNumber = 1
     for (const bindings of characters.values()) {
       const name = bindings.find((binding) => binding.purpose === 'character' || binding.purpose === 'character-angle')?.label.replace(/^Character:\s*/, '').split(' / ')[0] ?? bindings[0].label.split(' for ').at(-1) ?? 'character'
       const pictures = bindings.map((binding) => `<Picture ${binding.number}>`).join(', ')
-      subjectLines.push(`<Subject ${subjectNumber++}> is ${name}, defined by ${pictures}. Preserve the assigned identity, hair, wardrobe, accessories, and approved detail references only in the role explicitly assigned to each picture.`)
+      const subject = `<Subject ${subjectNumber++}>`
+      subjectLines.push(`${subject} is ${name}, defined by ${pictures}. Preserve the assigned identity, hair, wardrobe, accessories, and approved detail references only in the role explicitly assigned to each picture.`)
+      retentionLines.push(`${subject} (appears in [Shot 1]): fully_preserved - retain ${name}'s approved identity and all assigned attributes without merging, swapping, or duplicating them.`)
     }
-    for (const binding of numbered.filter((binding) => binding.purpose === 'location')) subjectLines.push(`<Subject ${subjectNumber++}> is the approved ${binding.label.replace(/^Location:\s*/, '')} environment from <Picture ${binding.number}>. Preserve its spatial layout, materials, landmarks, and atmosphere.`)
-    for (const binding of numbered.filter((binding) => binding.purpose === 'generic')) subjectLines.push(`<Subject ${subjectNumber++}> is the visual planning reference in <Picture ${binding.number}>.`)
+    for (const binding of numbered.filter((binding) => binding.purpose === 'location')) {
+      const subject = `<Subject ${subjectNumber++}>`
+      const name = binding.label.replace(/^Location:\s*/, '')
+      subjectLines.push(`${subject} is the approved ${name} environment from <Picture ${binding.number}>. Preserve its spatial layout, materials, landmarks, and atmosphere.`)
+      retentionLines.push(`${subject} (appears in [Shot 1]): fully_preserved - retain the approved ${name} layout, landmarks, lighting logic, and atmosphere.`)
+    }
+    for (const binding of numbered.filter((binding) => binding.purpose === 'generic')) {
+      const subject = `<Subject ${subjectNumber++}>`
+      subjectLines.push(`${subject} is the visual planning reference in <Picture ${binding.number}>.`)
+      retentionLines.push(`${subject} (appears where relevant): weak_reference - use only its requested composition, style, or visual planning cues.`)
+    }
     const sourceLines = numbered.filter((binding) => !binding.characterId && binding.purpose !== 'location' && binding.purpose !== 'generic').map((binding) => `<Picture ${binding.number}> is used only as ${binding.label}.`)
+    const videoDefinitions = Array.from({ length: input.referenceVideoCount ?? 0 }, (_, index) => `<Video ${index + 1}> is a temporal reference for the target video. Use it only for requested action timing, camera movement, cut rhythm, or motion qualities; it is not a source-video edit or continuation unless the detailed description explicitly says so.`)
+    const audioDefinitions = Array.from({ length: input.referenceAudioCount ?? 0 }, (_, index) => `<Audio ${index + 1}> is an audio reference for the target video. Use only the requested voice timbre, delivery, rhythm, music style, or sound texture; do not copy the source signal verbatim unless the detailed description explicitly says so.`)
+    const mediaRetention = [
+      ...Array.from({ length: input.referenceVideoCount ?? 0 }, (_, index) => `<Video ${index + 1}> (camera, action, or temporal structure): weak_reference - transfer only the requested motion or pacing qualities without copying source subjects or footage.`),
+      ...Array.from({ length: input.referenceAudioCount ?? 0 }, (_, index) => `<Audio ${index + 1}>: reference - use only the requested timbre, rhythm, music style, or sound texture; generate a new synchronized target soundtrack.`),
+    ]
     return [
-      `subject_definitions:\n${[...subjectLines, ...sourceLines].join('\n')}`,
-      `summary: Create one coherent target video from the approved sources. Reference assignments are authoritative and must not be swapped, merged, duplicated, or treated as on-screen source material.`,
-      `retention_analysis: ${referenceDirection || 'Retain every numbered reference only for the role stated in the detailed description. Do not swap, merge, duplicate, or show source sheets, panels, or backgrounds.'}`,
+      `subject_definitions:\n${[...subjectLines, ...sourceLines, ...videoDefinitions, ...audioDefinitions].join('\n')}`,
+      `summary: [reference generation] Create one coherent target video from the approved sources. Reference assignments are authoritative and must not be swapped, merged, duplicated, or treated as on-screen source material.`,
+      `retention_analysis:\n${[...retentionLines, ...mediaRetention, referenceDirection || 'Reference assignments are role-specific; do not swap, merge, duplicate, or show source sheets, panels, or backgrounds.'].join('\n')}`,
       `detailed_description: ${composed}`,
       `overall_soundscape: ${soundscape}`,
       `non_diegetic_music: ${music}`,
@@ -508,7 +541,24 @@ function App() {
   }, [promptSuggestion, promptSuggestionId])
   const onLiveProgress = useCallback((id: string, update: LiveProgress) => {
     if (!id) return
-    setJobs((current) => current.map((j) => j.promptId === id && ['running', 'queued'].includes(j.status) ? { ...j, ...update, progress: update.progress ?? j.progress, status: 'running' } : j))
+    const receivedAt = Date.now()
+    setJobs((current) => current.map((j) => {
+      if (j.promptId !== id || !['running', 'queued'].includes(j.status)) return j
+      const advancedSamplerStep = update.currentStep !== undefined && update.currentStep > (j.currentStep ?? -1)
+      const measuredStepMs = advancedSamplerStep && j.lastSamplerStepAt && j.currentStep !== undefined
+        ? receivedAt - j.lastSamplerStepAt
+        : undefined
+      const estimatedSamplerStepMs = measuredStepMs
+        ? j.estimatedSamplerStepMs ? Math.round(j.estimatedSamplerStepMs * 0.65 + measuredStepMs * 0.35) : measuredStepMs
+        : j.estimatedSamplerStepMs
+      return {
+        ...j,
+        ...update,
+        progress: update.progress ?? j.progress,
+        status: 'running',
+        ...(advancedSamplerStep ? { lastSamplerStepAt: receivedAt, estimatedSamplerStepMs } : {}),
+      }
+    }))
   }, [])
   // Keep the lightweight ComfyUI event socket active even when image previews
   // are hidden so queue, node, and sampler-step progress remain real-time.
@@ -532,6 +582,7 @@ function App() {
   const activeRenderRuntime = activeRenderJob
     ? activeRenderJob.renderDurationMs ?? (['queued', 'running'].includes(activeRenderJob.status) ? Math.max(0, runtimeNow - activeRenderJob.createdAt) : undefined)
     : undefined
+  const activeSamplerProgress = samplerProgressSummary(activeRenderJob, runtimeNow)
   const pendingKey = pendingJobs.map((job) => job.id).join(',')
   const jobsRef = useRef(jobs)
   jobsRef.current = jobs
@@ -1273,7 +1324,7 @@ function App() {
     setNotice({ tone: 'neutral', text: 'Uploading inputs and preparing the ComfyUI graph…' })
     const workspaceBindings = workspaceBindingsFor(selectedReferenceCharacterIds, selectedReferenceLocationIds)
     const renderReferenceImages = resolveRenderReferenceImages(referenceImages, workspaceBindings, clothingPolicy)
-    const effectivePrompt = composeH3Prompt({ prompt, mode, duration, bindings: workspaceBindings, clothingPolicy, noDialogue, naturalMovement })
+    const effectivePrompt = composeH3Prompt({ prompt, mode, duration, bindings: workspaceBindings, clothingPolicy, noDialogue, naturalMovement, referenceVideoCount: referenceVideos.length, referenceAudioCount: referenceAudios.length })
     const [width, height] = resolution.split('x').map(Number)
     const localId = createId()
     const job: GenerationJob = {
@@ -1407,6 +1458,7 @@ function App() {
         <div className="titlebar-brand"><span className="brand-mark"><Film size={16} /></span><span>MiniMax Studio</span></div>
         <div className="titlebar-drag" />
         {activeRenderRuntime !== undefined && <span className={`titlebar-runtime ${activeRenderJob?.status === 'running' || activeRenderJob?.status === 'queued' ? 'active' : ''}`} role="status" title="Total time since this render was queued"><Clock3 size={13} />{activeRenderJob?.status === 'queued' ? 'Queued' : activeRenderJob?.status === 'running' ? 'Rendering' : 'Render'} · {formatRuntime(activeRenderRuntime)}</span>}
+        {activeSamplerProgress && <span className="titlebar-sampler" role="status" title={`ComfyUI sampler progress: ${activeSamplerProgress.currentStep} of ${activeSamplerProgress.totalSteps}${activeSamplerProgress.rate ? `, averaging ${formatStepDuration(activeSamplerProgress.rate)}` : ''}${activeSamplerProgress.nextStepIn !== undefined ? `, approximately ${formatRuntime(activeSamplerProgress.nextStepIn)} until the next update` : ''}`}><Gauge size={13} /><strong>{activeSamplerProgress.progress}%</strong><span>{activeSamplerProgress.currentStep}/{activeSamplerProgress.totalSteps}</span>{activeSamplerProgress.rate && <span className="sampler-step-rate">{formatStepDuration(activeSamplerProgress.rate)}</span>}{activeSamplerProgress.nextStepIn !== undefined && <span>next ≈ {formatRuntime(activeSamplerProgress.nextStepIn)}</span>}</span>}
         {(view === 'create' || view === 'ltx25' || view === 'zimage') && <button className="titlebar-action titlebar-reset" onClick={resetCurrentWorkspace} title="Reset prompts, options, media, selections, and the current preview in this workspace"><RotateCcw size={14} />Reset workspace</button>}
         <GpuMeter value={gpu} />
         <button className="titlebar-action" onClick={() => { setLanOpen(true); void window.minimax.getLanStatus().then(setLanStatus) }} title="Share MiniMax Studio over your local network"><QrCode size={14} />LAN</button>
@@ -1738,7 +1790,7 @@ function CreateView(props: CreateViewProps) {
   const selectedBindings = allocateWorkspaceReferences(selectedCharacters.map((character) => ({ id: character.id, name: character.name, identity: characterReferences(character), detailReferences: characterDetailReferencesEnabled ? character.detailReferences : [], hairStyleIds: character.hairStyleIds, wardrobeIds: character.wardrobeIds, accessoryIds: character.accessoryIds })), wardrobes, selectedLocations.map((location) => ({ id: location.id, name: location.name, images: locationReferences(location), environmentMode: location.environmentMode })))
   const activeSelectedBindings = clothingPolicy === 'wardrobe' ? selectedBindings : selectedBindings.filter((binding) => binding.purpose !== 'wardrobe')
   const builderReferenceImages = resolveRenderReferenceImages(referenceImages, selectedBindings, clothingPolicy)
-  const composedPrompt = composeH3Prompt({ prompt, mode, duration, bindings: selectedBindings, clothingPolicy, noDialogue, naturalMovement })
+  const composedPrompt = composeH3Prompt({ prompt, mode, duration, bindings: selectedBindings, clothingPolicy, noDialogue, naturalMovement, referenceVideoCount: referenceVideos.length, referenceAudioCount: referenceAudios.length })
   const sourceMediaCount = referenceImages.length + referenceVideos.length + referenceAudios.length
   const closeSourceMedia = useCallback(() => {
     setSourceMediaOpen(false)
@@ -1806,13 +1858,21 @@ function CreateView(props: CreateViewProps) {
         <div className="heading-state"><span className={modelReady && h3Validated ? 'ok' : 'warn'}>{modelReady && h3Validated ? <Check size={15} /> : <AlertCircle size={15} />}{!modelReady ? 'Check model paths' : h3Validated ? 'Validated H3 stack' : 'Custom H3 stack'}</span></div>
       </div>
 
+      <nav className="workspace-stage-nav" aria-label="Create workspace sections">
+        <span>WORKFLOW</span>
+        <button type="button" onClick={() => document.getElementById('workspace-direction')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}><WandSparkles size={14} />Direction</button>
+        {mode !== 'text' && <button type="button" onClick={() => document.getElementById('workspace-sources')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}><ImageIcon size={14} />Sources</button>}
+        <button type="button" onClick={() => document.getElementById('workspace-output')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}><Gauge size={14} />Render settings</button>
+        <button type="button" onClick={() => document.getElementById('workspace-preview')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}><Film size={14} />Preview</button>
+      </nav>
+
       <div className="workspace-grid">
         <section className="composer-panel">
           <div className="mode-tabs" role="tablist" aria-label="Generation mode">
             {modeInfo.map((item) => <button key={item.id} role="tab" aria-selected={mode === item.id} className={mode === item.id ? 'selected' : ''} onClick={() => setMode(item.id)}><item.icon size={18} /><span><strong>{item.label}</strong><small>{item.note}</small></span></button>)}
           </div>
 
-          <section className={`create-section create-direction-section ${mode === 'reference' ? 'reference-prompt-builder' : ''}`}>
+          <section id="workspace-direction" className={`create-section create-direction-section ${mode === 'reference' ? 'reference-prompt-builder' : ''}`}>
             <div className="create-section-heading"><span><WandSparkles size={15} /></span><div><strong>{mode === 'reference' ? 'Prompt Builder' : 'Shot direction'}</strong><small>{mode === 'reference' ? 'Compose the scene while reference assignments and safeguards stay synchronized.' : 'Describe the subject, action, camera, lighting, and sound.'}</small></div><em className={prompt.trim() ? 'complete' : ''}>{prompt.trim() ? 'Ready' : 'Required'}</em></div>
           <div className="field-group prompt-field">
             {mode === 'reference' && <>
@@ -1855,7 +1915,7 @@ function CreateView(props: CreateViewProps) {
           </div>
           </section>
 
-          {(mode === 'image' || mode === 'frames' || mode === 'reference') && <section className={`create-section create-input-section ${mode === 'reference' ? 'source-media-section' : ''}`}>
+          {(mode === 'image' || mode === 'frames' || mode === 'reference') && <section id="workspace-sources" className={`create-section create-input-section ${mode === 'reference' ? 'source-media-section' : ''}`}>
             <div className="create-section-heading"><span><ImageIcon size={15} /></span><div><strong>Source media</strong><small>{mode === 'reference' ? 'Choose reusable identity, motion, and audio references.' : mode === 'frames' ? 'Set the opening and closing composition.' : 'Choose the frame this shot begins from.'}</small></div><em className={(mode === 'reference' ? referenceImages.length + referenceVideos.length + referenceAudios.length > 0 : firstFrame && (mode !== 'frames' || lastFrame)) ? 'complete' : ''}>{mode === 'reference' ? `${referenceImages.length + referenceVideos.length + referenceAudios.length} loaded` : mode === 'frames' ? `${Number(Boolean(firstFrame)) + Number(Boolean(lastFrame))} of 2` : firstFrame ? 'Ready' : 'Required'}</em></div>
           {(mode === 'image' || mode === 'frames') && (
             <div className={`frame-grid ${mode === 'image' ? 'single' : ''}`}>
@@ -1911,7 +1971,7 @@ function CreateView(props: CreateViewProps) {
 
         </section>
 
-        <aside className="preview-panel">
+        <aside id="workspace-preview" className="preview-panel">
           <div className="panel-heading"><div><span>OUTPUT</span><strong>Current workspace</strong></div>{latestJob && <StatusBadge status={latestJob.status} />}</div>
           {liveEnabled && livePreview && livePreview.promptId === latestJob?.promptId && latestJob && ['running', 'queued'].includes(latestJob.status) && <figure className={`live-preview ${livePreview.animated ? 'animated' : ''}`}>{livePreview.mime === 'video/mp4' ? <video key={livePreview.url} src={livePreview.url} aria-label="Animated MiniMax H3 generation preview" autoPlay loop muted playsInline /> : <img key={livePreview.url} src={livePreview.url} alt={livePreview.animated ? 'Animated MiniMax H3 generation preview' : 'Live generation preview'} />}<figcaption>{livePreview.animated ? `Animated H3 preview · 50 frames${livePreview.fps ? ` · ${livePreview.fps} fps` : ''}${livePreview.step && livePreview.totalSteps ? ` · sampler step ${livePreview.step} of ${livePreview.totalSteps}` : ''}` : 'Live preview · intermediate frame'}</figcaption></figure>}
           <div className="preview-stage">
@@ -1924,7 +1984,7 @@ function CreateView(props: CreateViewProps) {
             <PipelineItem ready={Boolean(selection.videoVae && selection.audioVae)} label="Video + audio VAE" value={selection.videoVae && selection.audioVae ? 'Both detected' : 'Missing component'} />
             <PipelineItem ready={turbo === 'off' || Boolean(mode === 'reference' ? selection.ref2vLora : selection.fl2vLora)} label="Acceleration" value={turbo === 'off' ? 'Native sampling' : (mode === 'reference' ? selection.ref2vLora : selection.fl2vLora)} />
           </div>
-          <section className="create-section create-output-section preview-output-settings">
+          <section id="workspace-output" className="create-section create-output-section preview-output-settings">
             <div className="create-section-heading"><span><Gauge size={15} /></span><div><strong>Output and quality</strong><small>Tune the next render directly beneath its preview.</small></div><em className="complete">{resolution.replace('x', ' × ')} · {duration}s</em></div>
             {mode !== 'reference' && <div className="create-presets" aria-label="Recommended H3 presets"><button type="button" onClick={() => applyCreatePreset('quality')}><strong>Native Quality</strong><small>1344 × 768 · 30 steps</small></button><button type="button" onClick={() => applyCreatePreset('turbo')}><strong>Turbo 8</strong><small>Native canvas · official LoRA</small></button><button type="button" onClick={() => applyCreatePreset('preview')}><strong>Preview</strong><small>864 × 480 · Turbo 8</small></button></div>}
             <RenderSize value={resolution} onChange={setResolution} />
