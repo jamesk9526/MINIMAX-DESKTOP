@@ -227,14 +227,14 @@ export function MoviePlanner({ settings, ollamaAvailable, ollamaModel, onOpenSho
       const source = characterLibrary.find((character) => character.id === (event as CustomEvent<string>).detail)
       if (!source) return
       if (project.characters.some((character) => character.libraryCharacterId === source.id)) { onNotice('neutral', `${source.name} is already in this movie.`); return }
-      const character: MovieCharacter = { id: createId(), libraryCharacterId: source.id, libraryUpdatedAt: source.updatedAt, name: source.name, description: source.description, wardrobe: source.wardrobe, voiceNotes: source.voiceNotes, referenceImages: characterReferences(source) }
+      const character: MovieCharacter = { id: createId(), libraryCharacterId: source.id, libraryUpdatedAt: source.updatedAt, name: source.name, description: source.description, wardrobe: source.wardrobe, voiceNotes: source.voiceNotes, referenceImages: characterReferences(source, settings.characterDetailReferencesEnabled) }
       const next = projects.map((item) => item.id === project.id ? { ...item, updatedAt: Date.now(), characters: [...item.characters, character] } : item)
       commit(next)
       onNotice('success', `${source.name} and ${character.referenceImages.length} approved reference${character.referenceImages.length === 1 ? '' : 's'} added to this movie.`)
     }
     window.addEventListener(IMPORT_CHARACTER_EVENT, importCharacter)
     return () => window.removeEventListener(IMPORT_CHARACTER_EVENT, importCharacter)
-  }, [characterLibrary, project.id, project.characters, projects, onNotice])
+  }, [characterLibrary, project.id, project.characters, projects, settings.characterDetailReferencesEnabled, onNotice])
   useEffect(() => {
     const importLocation = (event: Event) => {
       const source = locationLibrary.find((location) => location.id === (event as CustomEvent<string>).detail)
@@ -247,7 +247,7 @@ export function MoviePlanner({ settings, ollamaAvailable, ollamaModel, onOpenSho
     const character = project.characters.find((item) => item.id === characterId)
     const source = character?.libraryCharacterId ? characterLibrary.find((item) => item.id === character.libraryCharacterId) : undefined
     if (!character || !source) return
-    update((value) => ({ ...value, characters: value.characters.map((item) => item.id === characterId ? { ...item, name: source.name, description: source.description, wardrobe: source.wardrobe, voiceNotes: source.voiceNotes, referenceImages: characterReferences(source), libraryUpdatedAt: source.updatedAt } : item) }))
+    update((value) => ({ ...value, characters: value.characters.map((item) => item.id === characterId ? { ...item, name: source.name, description: source.description, wardrobe: source.wardrobe, voiceNotes: source.voiceNotes, referenceImages: characterReferences(source, settings.characterDetailReferencesEnabled), libraryUpdatedAt: source.updatedAt } : item) }))
     onNotice('success', `${source.name} refreshed from Character Studio without changing shot assignments.`)
   }
   const importLibraryLocation = (source: LocationProject) => {
@@ -355,14 +355,14 @@ export function MoviePlanner({ settings, ollamaAvailable, ollamaModel, onOpenSho
   }
   const assistantButton = (key: string, label: string, action: () => void) => <button className="assistant-button" disabled={Boolean(assisting) || !ollamaAvailable} title={!ollamaAvailable ? `Connect a local ${llm.label} model in Settings` : `Use ${ollamaModel}`} onClick={action}>{assisting === key ? <LoaderCircle className="spin" size={14} /> : <Sparkles size={14} />}{assisting === key ? 'Working locally…' : label}</button>
   const smartOptionsForShot = (scene: MovieScene, shot: MovieShot): SmartInsertOption[] => {
-    const libraryOptions = characterLibrary.filter((source) => characterReferences(source).length > 0).map((source) => {
+    const libraryOptions = characterLibrary.filter((source) => characterReferences(source, settings.characterDetailReferencesEnabled).length > 0).map((source) => {
       const existing = project.characters.find((item) => item.libraryCharacterId === source.id)
-      const candidate: MovieCharacter = existing ?? { id: `library-${source.id}`, libraryCharacterId: source.id, libraryUpdatedAt: source.updatedAt, name: source.name, description: source.description, wardrobe: source.wardrobe, voiceNotes: source.voiceNotes, referenceImages: characterReferences(source) }
+      const candidate: MovieCharacter = existing ?? { id: `library-${source.id}`, libraryCharacterId: source.id, libraryUpdatedAt: source.updatedAt, name: source.name, description: source.description, wardrobe: source.wardrobe, voiceNotes: source.voiceNotes, referenceImages: characterReferences(source, settings.characterDetailReferencesEnabled) }
       const hypotheticalProject = existing ? project : { ...project, characters: [...project.characters, candidate] }
       const hypotheticalShot = { ...shot, characterIds: [...new Set([...shot.characterIds, candidate.id])] }
       const resolved = resolveMovieShot(hypotheticalProject, scene, hypotheticalShot, characterLibrary)
       const instruction = composeReferenceInstructions(resolved.references).find((line) => line.includes(`${source.name}'s`)) ?? `Preserve ${source.name}'s approved Character Studio identity.`
-      return { id: `character.${source.id}`, category: 'character' as const, label: source.name, description: source.description || 'Character Studio identity', insertion: `Character: ${source.name} — ${instruction}`, thumbnail: characterReferences(source)[0]?.preview, meta: `${characterReferences(source).length} approved · ${source.referenceMode}`, onSelect: (nextPrompt: string) => update((value) => {
+      return { id: `character.${source.id}`, category: 'character' as const, label: source.name, description: source.description || 'Character Studio identity', insertion: `Character: ${source.name} — ${instruction}`, thumbnail: characterReferences(source, settings.characterDetailReferencesEnabled)[0]?.preview, meta: `${characterReferences(source, settings.characterDetailReferencesEnabled).length} approved · ${source.referenceMode}`, onSelect: (nextPrompt: string) => update((value) => {
         const found = value.characters.find((item) => item.libraryCharacterId === source.id)
         const character = found ?? { ...candidate, id: createId() }
         return { ...value, characters: found ? value.characters : [...value.characters, character], scenes: value.scenes.map((item) => item.id !== scene.id ? item : { ...item, shots: item.shots.map((valueShot) => valueShot.id !== shot.id ? valueShot : { ...valueShot, prompt: nextPrompt, characterIds: [...new Set([...valueShot.characterIds, character.id])] }) }) }

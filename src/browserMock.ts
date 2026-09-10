@@ -19,10 +19,11 @@ const settings: AppSettings = {
   },
   outputDirectory: 'C:\\Users\\James\\Documents\\ComfyUI\\output',
   ffmpegPath: 'C:\\FFMPEG\\bin\\ffmpeg.exe',
+  characterDetailReferencesEnabled: false,
   generationDefaults: {
     resolution: '1344x768', duration: 5, turbo: 'off', steps: 30,
     sampler: 'res_multistep', scheduler: 'simple', experimentalSampling: false,
-    refImageSize: 'match', livePreview: true, sigmaShiftMode: 'model', shiftVideo: 12, shiftAudio: 3, loraStrength: 1, upscaleMode: 'off', textEncoderPreference: 'fast',
+    refImageSize: 'match', livePreview: true, sigmaShiftMode: 'model', shiftVideo: 12, shiftAudio: 3, loraStrength: 1, upscaleMode: 'off', textEncoderPreference: 'fast', turbo8Profile: 'balanced',
   },
 }
 

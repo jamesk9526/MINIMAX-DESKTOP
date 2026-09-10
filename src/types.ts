@@ -3,10 +3,11 @@ export type GenerationMode = 'text' | 'image' | 'frames' | 'reference'
 export type ModelKind = 'diffusion_models' | 'text_encoders' | 'vae' | 'loras' | 'vae_approx' | 'clip_vision'
 export type MediaKind = 'image' | 'video' | 'audio'
 export type UpscaleMode = 'off' | 'ltx' | 'rtx'
-export type ReferencePurpose = 'character' | 'character-angle' | 'hair' | 'wardrobe' | 'accessory' | 'location' | 'continuity' | 'product' | 'style' | 'generic'
+export type Turbo8Profile = 'stable' | 'balanced' | 'motion'
+export type ReferencePurpose = 'character' | 'character-angle' | 'detail' | 'hair' | 'wardrobe' | 'accessory' | 'location' | 'continuity' | 'product' | 'style' | 'generic'
 export type PromptPresetCategory = 'camera' | 'shot' | 'angle' | 'lens' | 'lighting' | 'audio' | 'style' | 'movement' | 'transition' | 'character' | 'wardrobe' | 'location'
 export type PromptPreset = { id: string; category: PromptPresetCategory; label: string; keywords: string[]; description: string; insertion: string }
-export type MovieReferenceBinding = { file: MediaFile; purpose: ReferencePurpose; label: string; characterId?: string; hairStyleId?: string; wardrobeId?: string; accessoryId?: string; locationId?: string; locationEnvironmentMode?: LocationProject['environmentMode']; source: 'character-studio' | 'hair-studio' | 'wardrobe-studio' | 'accessory-studio' | 'location-studio' | 'movie' | 'shot' | 'continuity' }
+export type MovieReferenceBinding = { file: MediaFile; purpose: ReferencePurpose; label: string; detailNotes?: string; characterId?: string; hairStyleId?: string; wardrobeId?: string; accessoryId?: string; locationId?: string; locationEnvironmentMode?: LocationProject['environmentMode']; source: 'character-studio' | 'hair-studio' | 'wardrobe-studio' | 'accessory-studio' | 'location-studio' | 'movie' | 'shot' | 'continuity' }
 export type ResolvedMovieShot = { preferredMode: GenerationMode; effectiveMode: GenerationMode; references: MovieReferenceBinding[]; compiledPrompt: string; routeReason: string; omittedReferences: MovieReferenceBinding[] }
 
 export type GenerationDefaults = {
@@ -25,6 +26,7 @@ export type GenerationDefaults = {
   loraStrength: number
   upscaleMode: UpscaleMode
   textEncoderPreference: 'fast' | 'quality'
+  turbo8Profile: Turbo8Profile
 }
 
 export type AppSettings = {
@@ -38,6 +40,7 @@ export type AppSettings = {
   paths: Record<ModelKind, string>
   outputDirectory: string
   ffmpegPath: string
+  characterDetailReferencesEnabled: boolean
   generationDefaults: GenerationDefaults
 }
 
@@ -59,6 +62,7 @@ export type CharacterProject = {
   baseImage?: MediaFile
   turntableVideo?: MediaFile
   referenceImages: MediaFile[]
+  detailReferences: CharacterDetailReference[]
   wardrobeIds: string[]
   accessoryIds: string[]
   hairStyleIds: string[]
@@ -66,6 +70,7 @@ export type CharacterProject = {
   hairPreset: string
   skinTone: string
 }
+export type CharacterDetailReference = { id: string; label: string; notes: string; image?: MediaFile }
 export type WardrobeProject = { id: string; name: string; description: string; accessories: string[]; materials: string; colors: string; visualStyle: string; referencePrompt: string; referenceImages: MediaFile[]; selectedReferencePaths?: string[]; createdAt: number; updatedAt: number }
 export type AccessoryProject = { id: string; name: string; category: 'jewelry' | 'eyewear' | 'watch' | 'bag' | 'headwear' | 'prop' | 'other'; description: string; materials: string; colors: string; visualStyle: string; referencePrompt: string; referenceImage?: MediaFile; createdAt: number; updatedAt: number }
 export type HairStyleProject = { id: string; name: string; description: string; texture: string; length: string; color: string; hairline: string; finish: string; visualStyle: string; referencePrompt: string; referenceImage?: MediaFile; createdAt: number; updatedAt: number }
@@ -286,6 +291,7 @@ export type GenerationJob = {
   renderWidth?: number
   renderHeight?: number
   duration: number
+  renderDurationMs?: number
   turbo?: 'off' | '4' | '8'
   steps?: number
   noDialogue?: boolean

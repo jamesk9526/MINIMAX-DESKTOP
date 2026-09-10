@@ -6,7 +6,7 @@ export const CHARACTER_LIBRARY_EVENT = 'minimax-character-library-changed'
 
 export function newCharacterProject(index = 1): CharacterProject {
   const now = Date.now()
-  return { id: createId(), name: `Character ${index}`, description: '', wardrobe: '', voiceNotes: '', visualStyle: 'cinematic photorealism', referencePrompt: '', createdAt: now, updatedAt: now, referenceMode: 'set', referenceImages: [], wardrobeIds: [], accessoryIds: [], hairStyleIds: [], identityTemplate: 'cinematic', hairPreset: '', skinTone: '' }
+  return { id: createId(), name: `Character ${index}`, description: '', wardrobe: '', voiceNotes: '', visualStyle: 'cinematic photorealism', referencePrompt: '', createdAt: now, updatedAt: now, referenceMode: 'set', referenceImages: [], detailReferences: [], wardrobeIds: [], accessoryIds: [], hairStyleIds: [], identityTemplate: 'cinematic', hairPreset: '', skinTone: '' }
 }
 
 export function loadCharacterProjects(): CharacterProject[] {
@@ -19,6 +19,7 @@ export function loadCharacterProjects(): CharacterProject[] {
       referencePrompt: item.wardrobe && item.referencePrompt?.includes(item.wardrobe) ? '' : item.referencePrompt ?? '',
       referenceMode: item.referenceMode === 'single' ? 'single' : 'set',
       referenceImages: item.referenceImages ?? [],
+      detailReferences: item.detailReferences ?? [],
       wardrobeIds: item.wardrobeIds ?? [],
       accessoryIds: item.accessoryIds ?? [],
       hairStyleIds: item.hairStyleIds ?? [],
@@ -36,10 +37,12 @@ export function updateCharacterProject(id: string, change: Partial<CharacterProj
   saveCharacterProjects(projects)
 }
 
-export function characterReferences(project: CharacterProject): MediaFile[] {
-  if (project.referenceMode === 'single') return project.baseImage ? [project.baseImage] : []
-  if (!project.referenceImages.length) return project.baseImage ? [project.baseImage] : []
-  return project.selectedReferencePaths === undefined
+export function characterReferences(project: CharacterProject, includeDetailReferences = false): MediaFile[] {
+  const identity = project.referenceMode === 'single' ? (project.baseImage ? [project.baseImage] : [])
+    : !project.referenceImages.length ? (project.baseImage ? [project.baseImage] : [])
+    : project.selectedReferencePaths === undefined
     ? project.referenceImages
     : project.referenceImages.filter((file) => project.selectedReferencePaths?.includes(file.path))
+  const details = includeDetailReferences ? (project.detailReferences ?? []).flatMap((detail) => detail.image ? [detail.image] : []) : []
+  return [...identity, ...details].filter((file, index, all) => all.findIndex((item) => item.path === file.path) === index)
 }

@@ -57,10 +57,16 @@ export function buildMiniMaxWorkflow(
     prompt['5'] = { class_type: 'LoraLoaderModelOnly', inputs: { model: modelLink, lora_name: loraName, strength_model: options.loraStrength ?? 1 } }
     modelLink = ['5', 0]
   }
-  if (options.sigmaShift) {
+  // Ref2VA Turbo 8-step v1.0 was trained at 768p with 6 / 3 shifts. This is
+  // part of that adapter's recipe, not a user tuning preference, so it wins
+  // over a stale custom-shift setting whenever this exact LoRA is selected.
+  const ref2vaTurbo8TrainingShifts = options.mode === 'reference' && options.turbo === '8'
+    && /^minimax_h3_ref2v_turbo_8step_v1\.0_768p_comfyui_bf16\.safetensors$/i.test(models.ref2vLora)
+  const sigmaShift = ref2vaTurbo8TrainingShifts ? { video: 6, audio: 3 } : options.sigmaShift
+  if (sigmaShift) {
     prompt['6'] = {
       class_type: 'MiniMaxH3SigmaShift',
-      inputs: { model: modelLink, shift_video: options.sigmaShift.video, shift_audio: options.sigmaShift.audio },
+      inputs: { model: modelLink, shift_video: sigmaShift.video, shift_audio: sigmaShift.audio },
     }
     modelLink = ['6', 0]
   }
@@ -117,8 +123,12 @@ export function buildMiniMaxWorkflow(
 
   prompt['11'] = { class_type: 'RandomNoise', inputs: { noise_seed: options.seed } }
   prompt['12'] = { class_type: 'BasicGuider', inputs: { model: modelLink, conditioning: ['10', 0] } }
-  const sampler = options.experimentalSampling ? options.sampler : OFFICIAL_H3_SAMPLER
-  const scheduler = options.experimentalSampling ? options.scheduler : OFFICIAL_H3_SCHEDULER
+  // Turbo 8 profiles are intentional, tested recipes—not an accidental custom
+  // override. Full-quality and Turbo 4 retain the upstream safe pair unless a
+  // user explicitly opts into experimental sampling.
+  const useRequestedSampling = options.experimentalSampling || options.turbo === '8'
+  const sampler = useRequestedSampling ? options.sampler : OFFICIAL_H3_SAMPLER
+  const scheduler = useRequestedSampling ? options.scheduler : OFFICIAL_H3_SCHEDULER
   prompt['13'] = { class_type: 'KSamplerSelect', inputs: { sampler_name: sampler } }
   prompt['14'] = {
     class_type: 'BasicScheduler',

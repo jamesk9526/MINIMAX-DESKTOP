@@ -33,7 +33,7 @@ for (const [width, height] of [[608, 352], [352, 608], [768, 768]]) {
 }
 const models = { fl2va: 'fl2va', ref2va: 'ref2va', textEncoder: 'clip', videoVae: 'video', audioVae: 'audio', fl2vLora: 'fl-lora', ref2vLora: 'ref-lora' }
 for (const mode of ['text', 'image', 'frames', 'reference']) for (const duration of [2, 3, 5, 15]) {
-  const g = buildMiniMaxWorkflow({ mode, width: 352, height: 608, prompt: 'neutral test', duration, seed: 123, steps: 20, turbo: '8', sampler: 'heun', scheduler: 'karras', filenamePrefix: 'test', refImageSize: 'match', upscale: { type: 'ltx', model: 'ltx-upscale', vae: 'ltx-vae' } }, models, { first: { name: 'first.png' }, last: { name: 'last.png' }, images: [{ name: 'ref.png' }], videos: [], audios: [] })
+  const g = buildMiniMaxWorkflow({ mode, width: 352, height: 608, prompt: 'neutral test', duration, seed: 123, steps: 20, turbo: '8', sampler: 'res_multistep', scheduler: 'simple', filenamePrefix: 'test', refImageSize: 'match', upscale: { type: 'ltx', model: 'ltx-upscale', vae: 'ltx-vae' } }, models, { first: { name: 'first.png' }, last: { name: 'last.png' }, images: [{ name: 'ref.png' }], videos: [], audios: [] })
   assert.equal(g['13'].inputs.sampler_name, OFFICIAL_H3_SAMPLER)
   assert.equal(g['14'].inputs.scheduler, OFFICIAL_H3_SCHEDULER)
   assert.equal(g['14'].inputs.steps, 8)
@@ -87,6 +87,13 @@ assert.equal(compatibilityTurbo['13'].inputs.sampler_name, 'euler')
 assert.equal(compatibilityTurbo['14'].inputs.scheduler, 'beta')
 assert.equal(compatibilityTurbo['14'].inputs.steps, 8)
 
+const turboStable = buildMiniMaxWorkflow({ mode: 'text', width: 1344, height: 768, prompt: 'test', duration: 5, seed: 1, steps: 20, turbo: '8', sampler: 'euler', scheduler: 'simple', filenamePrefix: 'test', refImageSize: 'match' }, models, { images: [], videos: [], audios: [] })
+assert.equal(turboStable['13'].inputs.sampler_name, 'euler')
+assert.equal(turboStable['14'].inputs.scheduler, 'simple')
+const turboMotion = buildMiniMaxWorkflow({ mode: 'text', width: 1344, height: 768, prompt: 'test', duration: 5, seed: 1, steps: 20, turbo: '8', sampler: 'res_multistep', scheduler: 'beta', filenamePrefix: 'test', refImageSize: 'match' }, models, { images: [], videos: [], audios: [] })
+assert.equal(turboMotion['13'].inputs.sampler_name, 'res_multistep')
+assert.equal(turboMotion['14'].inputs.scheduler, 'beta')
+
 const officialModels = inferSelections([
   { kind: 'diffusion_models', name: 'minimax_h3_fl2va_other.safetensors' },
   { kind: 'diffusion_models', name: 'minimax_h3_fl2va_pruned_int8_convrot.safetensors' },
@@ -114,6 +121,9 @@ const refEightGraph = buildMiniMaxWorkflow({ mode: 'reference', width: 1344, hei
 assert.equal(refEightGraph['1'].inputs.unet_name, 'minimax_h3_ref2va_pruned_int8_convrot.safetensors')
 assert.equal(refEightGraph['5'].inputs.lora_name, 'minimax_h3_ref2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors')
 assert.equal(refEightGraph['5'].inputs.strength_model, 1)
+assert.equal(refEightGraph['6'].class_type, 'MiniMaxH3SigmaShift')
+assert.equal(refEightGraph['6'].inputs.shift_video, 6)
+assert.equal(refEightGraph['6'].inputs.shift_audio, 3)
 assert.equal(refEightGraph['10'].class_type, 'MiniMaxH3ReferenceToVideo')
 assert.equal(refEightGraph['14'].inputs.steps, 8)
 

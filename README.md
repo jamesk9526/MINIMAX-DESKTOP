@@ -44,7 +44,7 @@ Both addresses, every model directory, and the ComfyUI output directory can be c
 
 MiniMax generation is built from ComfyUI's official T2V/I2V/Ref2V core graph: native H3 conditioning, `RandomNoise`, `BasicGuider`, `res_multistep`, `simple`, joint video/audio latent decoding, and `CreateVideo`/`SaveVideo`. The app prefers the official pruned INT8 ConvRot diffusion safetensors, NVFP4-AWQ text encoder, FP16 video VAE, and FP32 audio VAE when multiple matching files exist. Live preview and LTX/RTX upscaling are separate output branches and do not alter the base H3 sampling path.
 
-Turbo sampling uses the official sampler/scheduler pair unless the user explicitly enables custom sampling. Custom combinations remain clearly marked experimental because they are not equivalent to the published template and can produce unusual motion or composition.
+Turbo sampling uses the official sampler/scheduler pair unless the user explicitly enables custom sampling. Ref2VA Turbo 8-step v1.0 at 768p automatically applies its required 6 / 3 training shifts. Custom combinations remain clearly marked experimental because they are not equivalent to the published template and can produce unusual motion or composition.
 
 The Settings workspace can save and apply resolution, duration, quality mode, full-quality steps, LoRA strength, reference-image fidelity, live preview, sampler/scheduler, and sigma-shift defaults. Native H3 behavior leaves shifts on the model baseline (video 12, audio 3). Enabling custom shifts inserts ComfyUI's core `MiniMaxH3SigmaShift` node; the Euler/Beta preset is intentionally labeled experimental because it targets converted Turbo LoRA compatibility rather than the published template.
 
@@ -58,7 +58,7 @@ pnpm build
 pnpm package:win
 ```
 
-The installer is written to `release\MiniMax-Studio-Setup-0.1.0.exe`.
+The v0.12 installer is written to `release\MiniMax-Studio-Setup-0.12.0.exe`.
 - Independent model locations for diffusion models, text encoders, VAEs, LoRAs, preview VAEs, and vision encoders
 - ComfyUI connection health, GPU/VRAM display, job status, cancellation, history, and output playback
 - Responsive layouts for compact and large desktop windows

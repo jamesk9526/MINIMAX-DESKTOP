@@ -27,6 +27,7 @@ type GenerationDefaults = {
   loraStrength: number
   upscaleMode: 'off' | 'ltx' | 'rtx'
   textEncoderPreference: 'fast' | 'quality'
+  turbo8Profile: 'stable' | 'balanced' | 'motion'
 }
 
 type AppSettings = {
@@ -40,6 +41,7 @@ type AppSettings = {
   paths: Record<ModelKind, string>
   outputDirectory: string
   ffmpegPath: string
+  characterDetailReferencesEnabled: boolean
   generationDefaults: GenerationDefaults
 }
 
@@ -145,10 +147,11 @@ function defaultSettings(): AppSettings {
     paths: Object.fromEntries(modelKinds.map((kind) => [kind, join(root, kind)])) as Record<ModelKind, string>,
     outputDirectory: join(app.getPath('documents'), 'ComfyUI', 'output'),
     ffmpegPath: existsSync('C:\\FFMPEG\\bin\\ffmpeg.exe') ? 'C:\\FFMPEG\\bin\\ffmpeg.exe' : 'ffmpeg',
+    characterDetailReferencesEnabled: false,
     generationDefaults: {
       resolution: '1344x768', duration: 5, turbo: 'off', steps: 30,
       sampler: 'res_multistep', scheduler: 'simple', experimentalSampling: false,
-      refImageSize: 'match', livePreview: true, sigmaShiftMode: 'model', shiftVideo: 12, shiftAudio: 3, loraStrength: 1, upscaleMode: 'off', textEncoderPreference: 'fast',
+      refImageSize: 'match', livePreview: true, sigmaShiftMode: 'model', shiftVideo: 12, shiftAudio: 3, loraStrength: 1, upscaleMode: 'off', textEncoderPreference: 'fast', turbo8Profile: 'balanced',
     },
   }
 }
@@ -229,7 +232,8 @@ async function loadSettings(): Promise<AppSettings> {
     generationDefaults.steps = Math.max(16, Math.min(30, Number(generationDefaults.steps) || 30))
     if (raw.generationDefaults?.steps === 20) generationDefaults.steps = 30
     generationDefaults.textEncoderPreference = raw.generationDefaults?.textEncoderPreference === 'quality' ? 'quality' : 'fast'
-    return { ...defaults, ...raw, llmProvider: raw.llmProvider === 'lmstudio' ? 'lmstudio' : 'ollama', paths: { ...defaults.paths, ...raw.paths }, generationDefaults }
+    generationDefaults.turbo8Profile = raw.generationDefaults?.turbo8Profile === 'stable' || raw.generationDefaults?.turbo8Profile === 'motion' ? raw.generationDefaults.turbo8Profile : 'balanced'
+    return { ...defaults, ...raw, llmProvider: raw.llmProvider === 'lmstudio' ? 'lmstudio' : 'ollama', characterDetailReferencesEnabled: raw.characterDetailReferencesEnabled === true, paths: { ...defaults.paths, ...raw.paths }, generationDefaults }
   } catch {
     return defaultSettings()
   }
