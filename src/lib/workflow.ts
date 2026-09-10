@@ -130,9 +130,13 @@ export function buildMiniMaxWorkflow(
   const sampler = useRequestedSampling ? options.sampler : OFFICIAL_H3_SAMPLER
   const scheduler = useRequestedSampling ? options.scheduler : OFFICIAL_H3_SCHEDULER
   prompt['13'] = { class_type: 'KSamplerSelect', inputs: { sampler_name: sampler } }
+  // The 8-step adapter remains useful at 8–10 steps for a little extra
+  // coherence. Turbo 4 is a separate trained recipe and stays fixed at four.
+  const requestedTurbo8Steps = Math.round(Number(options.steps))
+  const scheduledSteps = options.turbo === 'off' ? options.steps : options.turbo === '8' ? requestedTurbo8Steps >= 4 && requestedTurbo8Steps <= 12 ? requestedTurbo8Steps : 8 : 4
   prompt['14'] = {
     class_type: 'BasicScheduler',
-    inputs: { model: modelLink, scheduler, steps: options.turbo === 'off' ? options.steps : Number(options.turbo), denoise: 1 },
+    inputs: { model: modelLink, scheduler, steps: scheduledSteps, denoise: 1 },
   }
   prompt['15'] = {
     class_type: 'SamplerCustomAdvanced',

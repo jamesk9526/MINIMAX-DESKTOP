@@ -13,14 +13,14 @@ const sentenceKey = (value: string) => value.toLowerCase().replace(/[^a-z0-9<>]+
 type CharacterReferenceInput = { id: string; name: string; identity: MediaFile[]; detailReferences?: CharacterProject['detailReferences']; hairStyleIds?: string[]; wardrobeIds: string[]; accessoryIds?: string[] }
 
 function detailBindings(character: CharacterReferenceInput) {
-  return (character.detailReferences ?? []).flatMap((detail) => detail.image ? [{
-    file: detail.image,
+  return (character.detailReferences ?? []).flatMap((detail) => detail.images.slice(0, 2).map((file, index) => ({
+    file,
     purpose: 'detail' as const,
-    label: `Detail: ${detail.label.trim() || 'approved visual detail'} for ${character.name}`,
+    label: `Detail: ${detail.label.trim() || 'approved visual detail'}${detail.images.length > 1 ? ` view ${index + 1}` : ''} for ${character.name}`,
     detailNotes: detail.notes.trim(),
     characterId: character.id,
     source: 'character-studio' as const,
-  }] : [])
+  })))
 }
 
 export function allocateCharacterReferences(characters: CharacterReferenceInput[], wardrobes: WardrobeProject[], limit = 9): MovieReferenceBinding[] {
@@ -177,14 +177,21 @@ export function compileMovieShotPrompt(project: MovieProject, scene: MovieScene,
 }
 
 export function buildPromptAssistantRequest(tool: PromptAssistantTool, draft: string, context: { duration: number; mode: GenerationMode; referenceMap?: string[]; noDialogue?: boolean }) {
-  const preservation = 'Preserve named characters, exact quoted dialogue, specified camera and lens choices, timing, negative constraints, continuity instructions, and every existing <Picture N>, <Video N>, and <Audio N> assignment. Treat the supplied reference map as authoritative: describe what each source contributes and never swap, merge, renumber, or vaguely refer to sources. Never rename characters, invent replacement wardrobe, remove reference tags, add unnecessary cuts, or turn one continuous shot into a montage.'
-  const order = 'Write concrete MiniMax-ready production language in this order when relevant: subject/identity and reference assignment, starting state, environment, literal chronological action, shot size, camera angle, lens/depth of field, camera movement, lighting, visual treatment, continuity, dialogue, ambient sound/effects, and exclusions. Prefer observable actions over abstract mood words.'
+  const preservation = 'Preserve named characters, exact quoted dialogue, specified camera and lens choices, timing, negative constraints, continuity instructions, and every existing <Picture N>, <Video N>, and <Audio N> assignment. Treat the supplied reference map as authoritative: describe what each source contributes and never swap, merge, renumber, or vaguely refer to sources. Never rename characters, invent replacement wardrobe, remove reference tags, add unnecessary cuts, or turn one continuous shot into a montage. Do not make reference images, sheets, mannequins, panels, or their backgrounds visible unless the draft explicitly requests them.'
+  const order = 'Use concrete, observable production language. For each shot establish composition and subjects, start state, environment and lighting, chronological action and state change, then camera movement written as a natural action (type, amplitude, and speed only when useful), synchronized diegetic sound, and exact dialogue. Prefer a camera move to a cut when the scene has not meaningfully changed.'
+  const format = context.mode === 'reference'
+    ? 'Return the official full-reference H3 structure in this exact order: subject_definitions, summary, retention_analysis, detailed_description, overall_soundscape, non_diegetic_music. Use stable <Subject N> labels for reusable people, places, objects, or styles; cite their <Picture N>, <Video N>, and <Audio N> sources in the definition. In detailed_description, put each label at its first visible or audible use. Use N/A for non_diegetic_music unless a score is explicitly requested.'
+    : context.mode === 'image'
+      ? 'Start with the exact I2V alignment line: "For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced." Then return integrated_multimodal_description, overall_soundscape, and non_diegetic_music.'
+      : context.mode === 'frames'
+        ? `Start with the exact first/last-frame alignment line naming <Picture 1> at 0.00 seconds and <Picture 2> at ${context.duration.toFixed(2)} seconds. Then return integrated_multimodal_description, overall_soundscape, and non_diegetic_music. Describe the continuous physical path between the two frames; do not merely restate them.`
+        : 'Return integrated_multimodal_description, overall_soundscape, and non_diegetic_music. Use N/A for non_diegetic_music unless a score is explicitly requested.'
   const task = tool === 'enhance'
-    ? `Rewrite the draft as one polished MiniMax H3 ${context.mode === 'reference' ? 'reference-to-video' : context.mode === 'image' ? 'image-to-video' : context.mode === 'frames' ? 'first/last-frame' : 'text-to-video'} prompt. ${order}`
+      ? `Rewrite the draft as one polished MiniMax H3 ${context.mode === 'reference' ? 'reference-to-video' : context.mode === 'image' ? 'image-to-video' : context.mode === 'frames' ? 'first/last-frame' : 'text-to-video'} prompt. ${order} ${format}`
     : tool === 'timeline'
-      ? `Rewrite the draft as one continuous MiniMax H3 shot lasting exactly ${context.duration} seconds. Start each beat with a non-overlapping time range such as 0.0–2.0s; cover the entire duration with no gaps, overlaps, or time beyond ${context.duration}s. Use ${context.duration <= 6 ? '2–3' : context.duration <= 10 ? '3–5' : '4–6'} meaningful beats. Every beat must state the subject action, camera behavior, and continuity from the prior beat. Keep motion physically achievable, preserve screen direction and identity, avoid cuts or montages, and reserve enough time for the final action to settle. ${order}`
-      : `Preserve the visual direction and strengthen synchronized dialogue/vocal intent, ambience, sound effects, spatial placement, timing, and clean transitions. State no music when a score is not requested. ${order}`
-  return [task, preservation, context.noDialogue ? 'Audio constraint: no spoken dialogue, narration, voice-over, singing, lip-sync, subtitles, captions, or text overlays. Preserve ambient sound effects only.' : '', `Effective duration: ${context.duration} seconds`, `Effective generation route: ${context.mode}`, context.referenceMap?.length ? `REFERENCE MAP (authoritative):\n${context.referenceMap.join('\n')}` : '', 'Return only the finished prompt, with no analysis, preface, Markdown fence, or alternatives.', `DRAFT:\n${draft.trim()}`].filter(Boolean).join('\n\n')
+      ? `Rewrite the draft as one continuous MiniMax H3 shot lasting exactly ${context.duration} seconds. Use ${context.duration <= 6 ? 'one shot with 2–3 action beats' : context.duration <= 10 ? 'one shot with 3–5 action beats' : 'one shot with 4–6 action beats'}. If a cut is explicitly required, label later shots as [Shot N] At MM:SS.mmm with strictly increasing times. Keep motion physically achievable, preserve screen direction and identity, avoid montages, and reserve time for the final action to settle. ${order} ${format}`
+      : `Preserve the visual direction and strengthen synchronized dialogue/vocal intent, ambience, sound effects, spatial placement, timing, and clean transitions. State no music when a score is not requested. ${order} ${format}`
+  return [task, preservation, context.noDialogue ? 'Audio constraint: no spoken dialogue, narration, voice-over, singing, lip-sync, subtitles, captions, or text overlays. Preserve ambient sound effects only.' : 'For each speaking person, use a stable speaker ID such as (S1); put only the verbatim dialogue inside <d>[Language] ...</d>.', `Effective duration: ${context.duration} seconds`, `Effective generation route: ${context.mode}`, context.referenceMap?.length ? `REFERENCE MAP (authoritative):\n${context.referenceMap.join('\n')}` : '', 'Return only the finished prompt, with no analysis, preface, Markdown fence, or alternatives.', `DRAFT:\n${draft.trim()}`].filter(Boolean).join('\n\n')
 }
 
 export function resolveMovieShot(project: MovieProject, scene: MovieScene, shot: MovieShot, library: CharacterProject[], continuityFrame?: MediaFile): ResolvedMovieShot {

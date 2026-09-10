@@ -93,6 +93,8 @@ assert.equal(turboStable['14'].inputs.scheduler, 'simple')
 const turboMotion = buildMiniMaxWorkflow({ mode: 'text', width: 1344, height: 768, prompt: 'test', duration: 5, seed: 1, steps: 20, turbo: '8', sampler: 'res_multistep', scheduler: 'beta', filenamePrefix: 'test', refImageSize: 'match' }, models, { images: [], videos: [], audios: [] })
 assert.equal(turboMotion['13'].inputs.sampler_name, 'res_multistep')
 assert.equal(turboMotion['14'].inputs.scheduler, 'beta')
+const turboTenStep = buildMiniMaxWorkflow({ mode: 'text', width: 1344, height: 768, prompt: 'test', duration: 5, seed: 1, steps: 10, turbo: '8', sampler: 'euler', scheduler: 'simple', filenamePrefix: 'test', refImageSize: 'match' }, models, { images: [], videos: [], audios: [] })
+assert.equal(turboTenStep['14'].inputs.steps, 10)
 
 const officialModels = inferSelections([
   { kind: 'diffusion_models', name: 'minimax_h3_fl2va_other.safetensors' },

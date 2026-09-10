@@ -29,6 +29,7 @@ type GenerationDefaults = {
   textEncoderPreference: 'fast' | 'quality'
   turbo8Profile: 'stable' | 'balanced' | 'motion'
 }
+type RenderSettingsPreset = { id: string; name: string; values: GenerationDefaults; createdAt: number; updatedAt: number }
 
 type AppSettings = {
   llmProvider: 'ollama' | 'lmstudio'
@@ -42,6 +43,7 @@ type AppSettings = {
   outputDirectory: string
   ffmpegPath: string
   characterDetailReferencesEnabled: boolean
+  renderSettingsPresets: RenderSettingsPreset[]
   generationDefaults: GenerationDefaults
 }
 
@@ -148,6 +150,7 @@ function defaultSettings(): AppSettings {
     outputDirectory: join(app.getPath('documents'), 'ComfyUI', 'output'),
     ffmpegPath: existsSync('C:\\FFMPEG\\bin\\ffmpeg.exe') ? 'C:\\FFMPEG\\bin\\ffmpeg.exe' : 'ffmpeg',
     characterDetailReferencesEnabled: false,
+    renderSettingsPresets: [],
     generationDefaults: {
       resolution: '1344x768', duration: 5, turbo: 'off', steps: 30,
       sampler: 'res_multistep', scheduler: 'simple', experimentalSampling: false,
@@ -229,11 +232,11 @@ async function loadSettings(): Promise<AppSettings> {
     const raw = JSON.parse(await readFile(settingsPath(), 'utf8')) as Partial<AppSettings>
     const defaults = defaultSettings()
     const generationDefaults = { ...defaults.generationDefaults, ...raw.generationDefaults }
-    generationDefaults.steps = Math.max(16, Math.min(30, Number(generationDefaults.steps) || 30))
-    if (raw.generationDefaults?.steps === 20) generationDefaults.steps = 30
+    generationDefaults.steps = Math.max(4, Math.min(30, Number(generationDefaults.steps) || 30))
     generationDefaults.textEncoderPreference = raw.generationDefaults?.textEncoderPreference === 'quality' ? 'quality' : 'fast'
     generationDefaults.turbo8Profile = raw.generationDefaults?.turbo8Profile === 'stable' || raw.generationDefaults?.turbo8Profile === 'motion' ? raw.generationDefaults.turbo8Profile : 'balanced'
-    return { ...defaults, ...raw, llmProvider: raw.llmProvider === 'lmstudio' ? 'lmstudio' : 'ollama', characterDetailReferencesEnabled: raw.characterDetailReferencesEnabled === true, paths: { ...defaults.paths, ...raw.paths }, generationDefaults }
+    const renderSettingsPresets = Array.isArray(raw.renderSettingsPresets) ? raw.renderSettingsPresets.filter((preset) => preset && typeof preset.name === 'string' && preset.name.trim()).slice(0, 30).map((preset) => ({ id: typeof preset.id === 'string' ? preset.id : randomUUID(), name: preset.name.trim().slice(0, 60), values: { ...generationDefaults, ...(preset.values ?? {}) }, createdAt: Number(preset.createdAt) || Date.now(), updatedAt: Number(preset.updatedAt) || Date.now() })) : []
+    return { ...defaults, ...raw, llmProvider: raw.llmProvider === 'lmstudio' ? 'lmstudio' : 'ollama', characterDetailReferencesEnabled: raw.characterDetailReferencesEnabled === true, renderSettingsPresets, paths: { ...defaults.paths, ...raw.paths }, generationDefaults }
   } catch {
     return defaultSettings()
   }

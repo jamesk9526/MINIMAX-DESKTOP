@@ -20,6 +20,7 @@ const settings: AppSettings = {
   outputDirectory: 'C:\\Users\\James\\Documents\\ComfyUI\\output',
   ffmpegPath: 'C:\\FFMPEG\\bin\\ffmpeg.exe',
   characterDetailReferencesEnabled: false,
+  renderSettingsPresets: [],
   generationDefaults: {
     resolution: '1344x768', duration: 5, turbo: 'off', steps: 30,
     sampler: 'res_multistep', scheduler: 'simple', experimentalSampling: false,

@@ -19,7 +19,7 @@ export function loadCharacterProjects(): CharacterProject[] {
       referencePrompt: item.wardrobe && item.referencePrompt?.includes(item.wardrobe) ? '' : item.referencePrompt ?? '',
       referenceMode: item.referenceMode === 'single' ? 'single' : 'set',
       referenceImages: item.referenceImages ?? [],
-      detailReferences: item.detailReferences ?? [],
+      detailReferences: (item.detailReferences ?? []).map((detail) => ({ ...detail, images: (detail.images ?? (detail.image ? [detail.image] : [])).slice(0, 2) })),
       wardrobeIds: item.wardrobeIds ?? [],
       accessoryIds: item.accessoryIds ?? [],
       hairStyleIds: item.hairStyleIds ?? [],
@@ -43,6 +43,6 @@ export function characterReferences(project: CharacterProject, includeDetailRefe
     : project.selectedReferencePaths === undefined
     ? project.referenceImages
     : project.referenceImages.filter((file) => project.selectedReferencePaths?.includes(file.path))
-  const details = includeDetailReferences ? (project.detailReferences ?? []).flatMap((detail) => detail.image ? [detail.image] : []) : []
+  const details = includeDetailReferences ? (project.detailReferences ?? []).flatMap((detail) => detail.images ?? []) : []
   return [...identity, ...details].filter((file, index, all) => all.findIndex((item) => item.path === file.path) === index)
 }

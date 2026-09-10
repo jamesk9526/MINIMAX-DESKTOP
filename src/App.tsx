@@ -29,6 +29,7 @@ import {
   MessageSquareText,
   Music2,
   PanelLeftClose,
+  Pencil,
   Play,
   Plus,
   QrCode,
@@ -42,6 +43,7 @@ import {
   SlidersHorizontal,
   Sparkles,
   Upload,
+  Trash2,
   Users,
   Volume2,
   WandSparkles,
@@ -101,6 +103,7 @@ import type {
   MovieProject,
   MovieReferenceBinding,
   ResolvedMovieShot,
+  RenderSettingsPreset,
   WardrobeProject,
   MovieShot,
   OllamaModel,
@@ -182,7 +185,7 @@ function formatRuntime(milliseconds: number) {
 
 function buildCharacterDetailInstructions(characters: CharacterProject[], enabled: boolean) {
   if (!enabled) return []
-  return characters.flatMap((character) => (character.detailReferences ?? []).flatMap((detail) => detail.image
+  return characters.flatMap((character) => (character.detailReferences ?? []).flatMap((detail) => detail.images.length
     ? [`${character.name} detail reference${detail.label.trim() ? ` · ${detail.label.trim()}` : ''}: ${detail.notes.trim() || 'Preserve the visible detail exactly from its assigned reference image.'}`]
     : []))
 }
@@ -331,6 +334,7 @@ function syncReferencePrompt(value: string, previous: MovieReferenceBinding[], n
 function composeH3Prompt(input: {
   prompt: string
   mode: GenerationMode
+  duration: number
   bindings: MovieReferenceBinding[]
   clothingPolicy: 'wardrobe' | 'underwear' | 'unrestricted'
   noDialogue: boolean
@@ -345,19 +349,49 @@ function composeH3Prompt(input: {
       ? `${missingReferenceDirection} Clothing intent: keep only the underwear shown in each named adult character's own identity reference; do not add outer garments and ignore supplied wardrobe outfits.`
       : `${missingReferenceDirection} Clothing intent: adult fictional characters only; follow the scene prompt's explicit clothing or nudity direction. Clothing visible in identity references is not mandatory and must not override the scene prompt.`
   const composed = applyNaturalMovementPolicy(applyDialoguePolicy([input.prompt.trim(), input.mode === 'reference' && input.bindings.length ? policyDirection.trim() : ''].filter(Boolean).join(' '), input.noDialogue), input.naturalMovement)
-  // MiniMax H3 is trained to read an audiovisual script. Keep user-authored H3
-  // blocks intact, but turn ordinary workspace prose into the model's three
-  // documented core fields so audio and music are explicitly controlled.
-  if (/^\s*(?:how the reference pictures align|for the target video|integrated_multimodal_description):/i.test(composed)) return composed
+  // MiniMax H3 uses a distinct six-section contract in full-reference mode.
+  // It needs explicit subjects and retention rules, whereas T2V/I2V use the
+  // smaller audiovisual timeline format.
+  if (/^\s*(?:subject_definitions|summary|retention_analysis|detailed_description|how the reference pictures align|for the target video|integrated_multimodal_description):/i.test(composed)) return composed
   const musicRequested = /\b(?:background music|score|soundtrack|music begins|music plays|song)\b/i.test(composed)
   const soundscape = input.noDialogue
     ? 'Only the natural ambience and synchronized physical sound effects described in the shot; no speech, singing, narration, captions, or text overlays.'
     : 'Natural ambience and synchronized physical sound effects match the visible actions and environment. No additional voices, narration, or sound events are introduced.'
+  const music = musicRequested ? 'Use only the non-diegetic music explicitly requested in the visual description; do not add any other score.' : 'N/A'
+  if (input.mode === 'reference') {
+    const numbered = activeBindings.map((binding, index) => ({ ...binding, number: index + 1 }))
+    const subjectLines: string[] = []
+    const characters = new Map<string, typeof numbered>()
+    for (const binding of numbered.filter((binding) => binding.characterId)) characters.set(binding.characterId!, [...(characters.get(binding.characterId!) ?? []), binding])
+    let subjectNumber = 1
+    for (const bindings of characters.values()) {
+      const name = bindings.find((binding) => binding.purpose === 'character' || binding.purpose === 'character-angle')?.label.replace(/^Character:\s*/, '').split(' / ')[0] ?? bindings[0].label.split(' for ').at(-1) ?? 'character'
+      const pictures = bindings.map((binding) => `<Picture ${binding.number}>`).join(', ')
+      subjectLines.push(`<Subject ${subjectNumber++}> is ${name}, defined by ${pictures}. Preserve the assigned identity, hair, wardrobe, accessories, and approved detail references only in the role explicitly assigned to each picture.`)
+    }
+    for (const binding of numbered.filter((binding) => binding.purpose === 'location')) subjectLines.push(`<Subject ${subjectNumber++}> is the approved ${binding.label.replace(/^Location:\s*/, '')} environment from <Picture ${binding.number}>. Preserve its spatial layout, materials, landmarks, and atmosphere.`)
+    for (const binding of numbered.filter((binding) => binding.purpose === 'generic')) subjectLines.push(`<Subject ${subjectNumber++}> is the visual planning reference in <Picture ${binding.number}>.`)
+    const sourceLines = numbered.filter((binding) => !binding.characterId && binding.purpose !== 'location' && binding.purpose !== 'generic').map((binding) => `<Picture ${binding.number}> is used only as ${binding.label}.`)
+    return [
+      `subject_definitions:\n${[...subjectLines, ...sourceLines].join('\n')}`,
+      `summary: Create one coherent target video from the approved sources. Reference assignments are authoritative and must not be swapped, merged, duplicated, or treated as on-screen source material.`,
+      `retention_analysis: ${referenceDirection || 'Retain every numbered reference only for the role stated in the detailed description. Do not swap, merge, duplicate, or show source sheets, panels, or backgrounds.'}`,
+      `detailed_description: ${composed}`,
+      `overall_soundscape: ${soundscape}`,
+      `non_diegetic_music: ${music}`,
+    ].join('\n\n')
+  }
+  const alignment = input.mode === 'frames'
+    ? `How the reference pictures align with the target video — <Picture 1> (from [Shot 1]) aligns with the 0.00-second mark of the target video; <Picture 2> (from [Shot 1]) aligns with the ${input.duration.toFixed(2)}-second mark of the target video.`
+    : input.mode === 'image'
+      ? 'For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.'
+      : ''
   return [
+    alignment,
     `integrated_multimodal_description: [Shot 1] ${composed}`,
     `overall_soundscape: ${soundscape}`,
-    `non_diegetic_music: ${musicRequested ? 'Use only the non-diegetic music explicitly requested in the integrated multimodal description; do not add any other score.' : 'N/A'}`,
-  ].join('\n\n')
+    `non_diegetic_music: ${music}`,
+  ].filter(Boolean).join('\n\n')
 }
 
 function appendPromptAddition(current: string, addition: string) {
@@ -404,6 +438,12 @@ function App() {
   const [sigmaShiftMode, setSigmaShiftMode] = useState<'model' | 'custom'>(persisted.sigmaShiftMode)
   const [shiftVideo, setShiftVideo] = useState(persisted.shiftVideo)
   const [shiftAudio, setShiftAudio] = useState(persisted.shiftAudio)
+
+  useEffect(() => {
+    // Older workspaces stored 30 as their shared step value while Turbo was
+    // hard-wired to 8. Normalize only invalid Turbo 8 values on load/switch.
+    if (turbo === '8' && (steps < 4 || steps > 12)) setSteps(8)
+  }, [steps, turbo])
   const [loraStrength, setLoraStrength] = useState(persisted.loraStrength)
   const [info, setInfo] = useState<ObjectInfo>({})
   const h3PreviewOverrideNode = findH3PreviewOverrideNode(info)
@@ -1233,7 +1273,7 @@ function App() {
     setNotice({ tone: 'neutral', text: 'Uploading inputs and preparing the ComfyUI graph…' })
     const workspaceBindings = workspaceBindingsFor(selectedReferenceCharacterIds, selectedReferenceLocationIds)
     const renderReferenceImages = resolveRenderReferenceImages(referenceImages, workspaceBindings, clothingPolicy)
-    const effectivePrompt = composeH3Prompt({ prompt, mode, bindings: workspaceBindings, clothingPolicy, noDialogue, naturalMovement })
+    const effectivePrompt = composeH3Prompt({ prompt, mode, duration, bindings: workspaceBindings, clothingPolicy, noDialogue, naturalMovement })
     const [width, height] = resolution.split('x').map(Number)
     const localId = createId()
     const job: GenerationJob = {
@@ -1698,7 +1738,7 @@ function CreateView(props: CreateViewProps) {
   const selectedBindings = allocateWorkspaceReferences(selectedCharacters.map((character) => ({ id: character.id, name: character.name, identity: characterReferences(character), detailReferences: characterDetailReferencesEnabled ? character.detailReferences : [], hairStyleIds: character.hairStyleIds, wardrobeIds: character.wardrobeIds, accessoryIds: character.accessoryIds })), wardrobes, selectedLocations.map((location) => ({ id: location.id, name: location.name, images: locationReferences(location), environmentMode: location.environmentMode })))
   const activeSelectedBindings = clothingPolicy === 'wardrobe' ? selectedBindings : selectedBindings.filter((binding) => binding.purpose !== 'wardrobe')
   const builderReferenceImages = resolveRenderReferenceImages(referenceImages, selectedBindings, clothingPolicy)
-  const composedPrompt = composeH3Prompt({ prompt: [prompt, ...detailReferenceDirection].filter(Boolean).join('\n'), mode, bindings: selectedBindings, clothingPolicy, noDialogue, naturalMovement })
+  const composedPrompt = composeH3Prompt({ prompt, mode, duration, bindings: selectedBindings, clothingPolicy, noDialogue, naturalMovement })
   const sourceMediaCount = referenceImages.length + referenceVideos.length + referenceAudios.length
   const closeSourceMedia = useCallback(() => {
     setSourceMediaOpen(false)
@@ -1756,7 +1796,7 @@ function CreateView(props: CreateViewProps) {
     const base = preset === 'preview' ? square ? '640x640' : portrait ? '480x864' : '864x480' : square ? '768x768' : portrait ? '768x1344' : '1344x768'
     setResolution(base)
     setTurbo(preset === 'quality' ? 'off' : '8')
-    setSteps(30); setSampler('res_multistep'); setScheduler('simple'); setExperimentalSampling(false)
+    setSteps(preset === 'quality' ? 30 : 8); setSampler('res_multistep'); setScheduler('simple'); setExperimentalSampling(false)
     setSigmaShiftMode('model'); setShiftVideo(12); setShiftAudio(3); setLoraStrength(1); setUpscaleMode('off')
   }
   return (
@@ -1786,6 +1826,7 @@ function CreateView(props: CreateViewProps) {
               <label className="no-dialogue-toggle" title={`Adds a render instruction that blocks spoken words, narration, singing, lip-sync, captions, and text overlays${mode === 'reference' ? ' in this Reference render' : ''}.`}><input type="checkbox" checked={noDialogue} onChange={(event) => setNoDialogue(event.target.checked)} /><span><strong>{mode === 'reference' ? 'No dialogue · Reference mode' : 'No dialogue'}</strong><small>{noDialogue ? 'Ambient sound only' : 'Dialogue and lip-sync allowed'}</small></span></label>
               <label className="no-dialogue-toggle natural-movement-toggle" title="Adds restrained breathing, blinking, eye movement, and posture adjustment without changing the requested action, pose, camera, identity, wardrobe, or scene."><input type="checkbox" checked={naturalMovement} onChange={(event) => setNaturalMovement(event.target.checked)} /><span><strong>Natural movement</strong><small>{naturalMovement ? 'Subtle subject motion' : 'No added motion direction'}</small></span></label>
             </div>
+            {mode === 'reference' && <PromptInspector bindings={activeSelectedBindings} prompt={prompt} duration={duration} videoCount={referenceVideos.length} audioCount={referenceAudios.length} onOptimize={() => onPromptTool('enhance')} optimizing={Boolean(promptingTool)} canOptimize={ollamaAvailable} />}
             {mode === 'reference' && <ReferencePromptHelper pictureCount={builderReferenceImages.length} videoCount={referenceVideos.length} audioCount={referenceAudios.length} referenceInstructions={[...composeReferenceInstructions(activeSelectedBindings), ...detailReferenceDirection]} onInsert={insertPromptText} />}
             <div className="prompt-tools" aria-label="Local AI prompt tools">
               <div className="prompt-tool-buttons">
@@ -1889,7 +1930,7 @@ function CreateView(props: CreateViewProps) {
             <RenderSize value={resolution} onChange={setResolution} />
             {mode === 'reference' && <details className="output-reference-fidelity"><summary><Gauge size={16} /><span><small>REFERENCE FIDELITY</small><strong>{refImageSize === 'max' ? 'Maximum identity' : 'Balanced'}</strong><em>{refImageSize === 'max' ? 'Keep more original source detail' : 'Fit references to the output canvas'}</em></span><ChevronDown size={15} /></summary><fieldset><legend>Choose how much source-image detail H3 preserves</legend><label className={refImageSize === 'match' ? 'selected' : ''}><input type="radio" name="output-reference-fidelity" checked={refImageSize === 'match'} onChange={() => setRefImageSize('match')} /><span><strong>Balanced</strong><small>Fit references to the output canvas. Faster and uses less memory.</small></span></label><label className={refImageSize === 'max' ? 'selected' : ''}><input type="radio" name="output-reference-fidelity" checked={refImageSize === 'max'} onChange={() => setRefImageSize('max')} /><span><strong>Maximum identity</strong><small>Keep more original image detail. Slower and uses more memory.</small></span></label></fieldset></details>}
             <div className="render-controls"><div className="field-group"><label htmlFor="duration">Duration</label><div className="range-line"><input id="duration" type="range" min="2" max="15" step="0.5" value={duration} onChange={(event) => setDuration(Number(event.target.value))} /><output>{duration}s</output></div></div><SelectField label="Sampling quality" value={turbo === '4' && mode !== 'reference' ? '8' : turbo} onChange={(value) => { if (mode !== 'reference') applyCreatePreset(value === 'off' ? 'quality' : 'turbo'); else { setTurbo(value as 'off' | '4' | '8'); setSampler('res_multistep'); setScheduler('simple'); setExperimentalSampling(false); setSigmaShiftMode('model'); setShiftVideo(12); setShiftAudio(3); setLoraStrength(1); setUpscaleMode('off'); if (value === 'off' || value === '8') { const [rw, rh] = resolution.split('x').map(Number); setResolution(rw === rh ? '768x768' : rw > rh ? '1344x768' : '768x1344') } if (value === 'off') setSteps(30) } }} options={mode === 'reference' ? [["off", 'Native quality · 30 steps'], ["8", 'Turbo 8 · Ref2VA v1.0 · 768p'], ["4", 'Turbo 4 · Ref2VA v0.1']] : [["off", 'Native quality · 30 steps'], ["8", 'Official Turbo 8']]} /></div>
-            {turbo === '8' && <SelectField label="Turbo 8 profile" value={turbo8Profile} onChange={(value) => setTurbo8Profile(value as Turbo8Profile)} options={[["stable", 'Stable · Euler + Simple · faces/dialogue'], ["balanced", 'Balanced · res_multistep + Simple'], ["motion", 'Motion · res_multistep + Beta']]}/>}
+            {turbo === '8' && <><SelectField label="Turbo 8 profile" value={turbo8Profile} onChange={(value) => setTurbo8Profile(value as Turbo8Profile)} options={[["stable", 'Stable · Euler + Simple · faces/dialogue'], ["balanced", 'Balanced · res_multistep + Simple'], ["motion", 'Motion · res_multistep + Beta']]}/><NumberField label="Turbo 8 steps" value={steps} min={4} max={12} onChange={setSteps} /><p className="field-help">8 is the trained default. Use 9–10 steps when you want to test for a small coherence or detail gain; values are capped at 12 to keep the Turbo recipe practical.</p></>}
             {ref2vaTurbo8TrainingShifts && <p className="field-help"><strong>Ref2VA Turbo 8 training recipe active:</strong> 6 video / 3 audio shifts are applied automatically for this official 768p v1.0 LoRA. The adapter requirement overrides both native and custom shift fields.</p>}
             <div className="render-extras"><label><input type="checkbox" checked={liveEnabled} onChange={(event) => setLiveEnabled(event.target.checked)} />Live preview <small>{liveEnabled ? liveConnected ? 'Connected · waiting for preview frames' : 'Connecting to ComfyUI…' : 'Off'}</small></label><label className="live-preview-mode"><span>Preview source</span><select value={livePreviewMode} disabled={!liveEnabled} onChange={(event) => setLivePreviewMode(event.target.value as 'standard' | 'h3-override')}><option value="standard">Standard first frame</option><option value="h3-override">MiniMax H3 animated · 50 frames at 12 fps</option></select></label><p className={`field-help ${livePreviewMode === 'h3-override' && !h3PreviewOverrideAvailable ? 'upscale-warning' : ''}`}>{livePreviewMode === 'h3-override' && h3PreviewOverrideAvailable ? 'The installed MiniMax H3 Preview Override node is wired between the model and sampler and streams a 50-frame, 12 fps animated preview.' : livePreviewMode === 'h3-override' ? 'Animated preview is selected, but the required Preview Override node is not detected. Install or enable it, restart ComfyUI, then click the Local engine status to refresh before generating.' : h3PreviewOverrideAvailable ? 'MiniMax H3 Preview Override is installed. Select the animated option to preview motion while sampling.' : 'You can select animated preview now. Generation will wait until the MiniMax H3 Preview Override custom node is installed and detected.'}</p><div className="upscale-options" role="group" aria-labelledby="upscale-label"><span id="upscale-label">Post-render upscale</span><label><input type="radio" name="upscale" checked={upscaleMode === 'off'} onChange={() => setUpscaleMode('off')} />Off</label><label><input type="radio" name="upscale" checked={upscaleMode === 'ltx'} disabled={!ltxAvailable} onChange={() => setUpscaleMode('ltx')} />LTX 2.5 latent · 2×</label><label><input type="radio" name="upscale" checked={upscaleMode === 'rtx'} disabled={rtxModels.length === 0} onChange={() => setUpscaleMode('rtx')} />RTX / CUDA frames · 2× · experimental</label></div>{upscaleMode === 'rtx' && <SelectField label="AI upscale model" value={rtxModel} onChange={setRtxModel} options={rtxModels.map((name) => [name, name])} />}<p className={`field-help ${upscaleMode === 'rtx' ? 'upscale-warning' : ''}`}>{upscaleMode === 'ltx' ? `Verified latent pipeline: MiniMax frames are encoded with the LTX‑2.5 video VAE, spatially upsampled exactly 2× in latent space, decoded, trimmed to the original duration, and joined to the untouched MiniMax audio. Final size: ${resolution.split('x').map((value) => Number(value) * 2).join(' × ')}.` : upscaleMode === 'rtx' ? `Experimental frame-by-frame upscale using ${rtxModel || 'the selected model'}. It does not understand motion and can amplify noise, flicker, or temporal shimmer. Diagnose output quality with upscale Off first.` : !ltxAvailable && ltxMissingNodes.length ? `LTX 2× is unavailable until ComfyUI provides: ${ltxMissingNodes.join(', ')}.` : !ltxAvailable && rtxModels.length === 0 ? 'No compatible upscale models were reported by ComfyUI.' : 'The original MiniMax video is saved without post-processing.'}</p></div>
             <button className="advanced-toggle" onClick={() => setAdvanced(!advanced)} aria-expanded={advanced}><SlidersHorizontal size={16} />Advanced controls<ChevronDown size={15} className={advanced ? 'rotated' : ''} /></button>
@@ -1911,6 +1952,39 @@ function referenceBindingLabel(binding: MovieReferenceBinding, index: number) {
   const title = binding.label.replace(/^(Character|Wardrobe|Hair|Accessory|Location):\s*/i, '').replace(/\s*\/\s*(identity|wardrobe|hair|accessory|location).*$/i, '')
   const type = binding.purpose === 'wardrobe' ? 'Outfit' : binding.purpose === 'hair' ? 'Hair' : binding.purpose === 'location' ? 'Location' : binding.purpose === 'accessory' ? 'Accessory' : binding.purpose === 'detail' ? 'Detail' : 'Identity'
   return { title: title || `Picture ${index + 1}`, type }
+}
+
+function PromptInspector({ bindings, prompt, duration, videoCount, audioCount, onOptimize, optimizing, canOptimize }: { bindings: MovieReferenceBinding[]; prompt: string; duration: number; videoCount: number; audioCount: number; onOptimize(): void; optimizing: boolean; canOptimize: boolean }) {
+  const text = prompt.toLowerCase()
+  const characterGroups = new Map<string, MovieReferenceBinding[]>()
+  bindings.filter((binding) => binding.characterId).forEach((binding) => characterGroups.set(binding.characterId!, [...(characterGroups.get(binding.characterId!) ?? []), binding]))
+  const locationGroups = new Map<string, MovieReferenceBinding[]>()
+  bindings.filter((binding) => binding.purpose === 'location').forEach((binding) => locationGroups.set(binding.locationId ?? binding.label, [...(locationGroups.get(binding.locationId ?? binding.label) ?? []), binding]))
+  const has = (pattern: RegExp) => pattern.test(text)
+  const checks: Array<[string, boolean]> = [
+    ['Camera', has(/\b(camera|shot|push(?:es)? in|pull(?:s)? back|pan(?:s)?|tilt(?:s)?|track(?:s|ing)?|dolly|orbit|static)\b/)],
+    ['Action', has(/\b(walk(?:s|ing)?|turn(?:s|ing)?|look(?:s|ing)?|sit(?:s|ting)?|stand(?:s|ing)?|reach(?:es|ing)?|hold(?:s|ing)?|open(?:s|ing)?|smile(?:s|ing)?|move(?:s|ment|ing)?|breath(?:es|ing)?)\b/)],
+    ['Lighting', has(/\b(light|lighting|sun|window|neon|shadow|overcast|golden hour|daylight|night)\b/)],
+    ['Dialogue', has(/<d>|\b(dialogue|says|whispers|shouts|asks|replies)\b|["“][^"”]+["”]/)],
+    ['Audio', has(/\b(sound|audio|ambience|ambient|music|score|footstep|wind|rain|room tone|silent)\b/) || audioCount > 0 || videoCount > 0],
+  ]
+  const actionCount = (text.match(/\b(walk(?:s|ing)?|turn(?:s|ing)?|look(?:s|ing)?|sit(?:s|ting)?|stand(?:s|ing)?|reach(?:es|ing)?|hold(?:s|ing)?|open(?:s|ing)?|close(?:s|ing)?|smile(?:s|ing)?|run(?:s|ning)?|embrace(?:s|ing)?|pick(?:s|ing)?|place(?:s|ing)?)\b/g) ?? []).length
+  const warnings = [
+    bindings.length >= 8 && `${bindings.length} of 9 picture slots are allocated. Add a source only if it is more important than an existing view.`,
+    actionCount > Math.max(3, Math.ceil(duration / 1.5)) && `${actionCount} major actions are described for ${duration} seconds. Simplifying the action path will improve temporal coherence.`,
+    !checks.find(([label]) => label === 'Camera')?.[1] && 'No camera direction detected. H3 can infer one, but a deliberate camera choice is more controllable.',
+    !checks.find(([label]) => label === 'Audio')?.[1] && 'No sound direction detected. Add ambience or choose “No dialogue” for a more deterministic audio pass.',
+  ].filter(Boolean) as string[]
+  return <aside className="prompt-inspector" aria-labelledby="prompt-inspector-title">
+    <header><span><Gauge size={15} /><span><strong id="prompt-inspector-title">Prompt inspector</strong><small>Live production checks · automatic context is protected</small></span></span><em>{bindings.length} / 9 refs</em></header>
+    <div className="prompt-inspector-grid">
+      <section><span className="prompt-inspector-label">Characters</span>{characterGroups.size ? [...characterGroups.values()].map((group) => { const name = group.find((binding) => binding.purpose === 'character' || binding.purpose === 'character-angle')?.label.replace(/^Character:\s*/, '').split(' / ')[0] ?? group[0].label.split(' for ').at(-1); const roles = new Set(group.map((binding) => binding.purpose)); return <p key={group[0].characterId}><Check size={12} /><span><strong>{name}</strong><small>{group.length} assigned · {[...roles].map((role) => role === 'character-angle' ? 'identity' : role).join(', ')}</small></span></p> }) : <p className="empty"><AlertCircle size={12} /><span>No linked character</span></p>}</section>
+      <section><span className="prompt-inspector-label">Location</span>{locationGroups.size ? [...locationGroups.values()].map((group) => <p key={group[0].locationId ?? group[0].label}><Check size={12} /><span><strong>{group[0].label.replace(/^Location:\s*/, '')}</strong><small>{group.length} approved view{group.length === 1 ? '' : 's'}</small></span></p>) : <p className="empty"><AlertCircle size={12} /><span>No linked location</span></p>}</section>
+      <section><span className="prompt-inspector-label">Creative direction</span><div className="prompt-inspector-checks">{checks.map(([label, complete]) => <span className={complete ? 'complete' : 'missing'} key={label}>{complete ? <Check size={11} /> : <AlertCircle size={11} />}{label}</span>)}</div></section>
+    </div>
+    {warnings.length > 0 && <div className="prompt-inspector-warnings"><span><AlertCircle size={13} />Warnings</span>{warnings.map((warning) => <p key={warning}>{warning}</p>)}</div>}
+    <footer><span>{videoCount ? `${videoCount} motion reference${videoCount === 1 ? '' : 's'}` : 'No motion reference'} · {audioCount ? `${audioCount} audio reference${audioCount === 1 ? '' : 's'}` : 'no audio reference'}</span><button type="button" className="secondary-button" onClick={onOptimize} disabled={!canOptimize || optimizing || !prompt.trim()}>{optimizing ? <LoaderCircle className="spin" size={13} /> : <WandSparkles size={13} />}Optimize</button></footer>
+  </aside>
 }
 
 function AutomaticReferenceSummary({ bindings, onReview, onCopy, copyState }: { bindings: MovieReferenceBinding[]; onReview(): void; onCopy(): void; copyState: 'idle' | 'copied' | 'failed' }) {
@@ -2055,6 +2129,26 @@ function SettingsView({ settings, setSettings, info, models, h3Report, scanning,
   const activeModelField = settings.llmProvider === 'lmstudio' ? 'lmStudioModel' : 'ollamaModel'
   const activeUrlField = settings.llmProvider === 'lmstudio' ? 'lmStudioUrl' : 'ollamaUrl'
   const updateDefaults = (patch: Partial<AppSettings['generationDefaults']>) => setSettings({ ...settings, generationDefaults: { ...defaults, ...patch } })
+  const [presetName, setPresetName] = useState('')
+  const saveRenderPreset = () => {
+    const name = presetName.trim()
+    if (!name) return
+    const now = Date.now()
+    const existing = settings.renderSettingsPresets.find((preset) => preset.name.toLowerCase() === name.toLowerCase())
+    const preset: RenderSettingsPreset = { id: existing?.id ?? createId(), name, values: { ...defaults }, createdAt: existing?.createdAt ?? now, updatedAt: now }
+    setSettings({ ...settings, renderSettingsPresets: [...settings.renderSettingsPresets.filter((item) => item.id !== preset.id), preset] })
+    setPresetName('')
+  }
+  const applyRenderPreset = (preset: RenderSettingsPreset) => updateDefaults({ ...preset.values })
+  const renameRenderPreset = (preset: RenderSettingsPreset) => {
+    const name = window.prompt('Preset name', preset.name)?.trim()
+    if (!name) return
+    setSettings({ ...settings, renderSettingsPresets: settings.renderSettingsPresets.map((item) => item.id === preset.id ? { ...item, name: name.slice(0, 60), updatedAt: Date.now() } : item) })
+  }
+  const deleteRenderPreset = (preset: RenderSettingsPreset) => {
+    if (!window.confirm(`Delete render preset “${preset.name}”?`)) return
+    setSettings({ ...settings, renderSettingsPresets: settings.renderSettingsPresets.filter((item) => item.id !== preset.id) })
+  }
   const applyPreset = (preset: 'quality' | 'official-turbo' | 'preview') => {
     const common = { resolution: '1344x768', duration: 5, steps: 30, loraStrength: 1, shiftVideo: 12, upscaleMode: 'off' as const }
     if (preset === 'quality') updateDefaults({ ...common, turbo: 'off', sampler: 'res_multistep', scheduler: 'simple', experimentalSampling: false, sigmaShiftMode: 'model', shiftAudio: 3 })
@@ -2079,6 +2173,7 @@ function SettingsView({ settings, setSettings, info, models, h3Report, scanning,
         <button type="button" onClick={() => applyPreset('official-turbo')}><strong>Turbo 8</strong><small>Native canvas · official LoRA 1.0</small></button>
         <button type="button" onClick={() => applyPreset('preview')}><strong>Preview</strong><small>864 × 480 · official Turbo 8</small></button>
       </div>
+      <div className="render-preset-manager" aria-labelledby="render-preset-manager-title"><div><span><Save size={15} /><span><strong id="render-preset-manager-title">Saved render presets</strong><small>Save resolution, duration, Turbo profile, steps, fidelity, sampling, shifts, and upscale settings. Prompts and source media are never included.</small></span></span><span>{settings.renderSettingsPresets.length} saved</span></div><form onSubmit={(event) => { event.preventDefault(); saveRenderPreset() }}><label><span>Save current defaults as</span><input value={presetName} maxLength={60} onChange={(event) => setPresetName(event.target.value)} placeholder="e.g. Dialogue close-up" /></label><button className="secondary-button" type="submit" disabled={!presetName.trim()}><Plus size={14} />Save preset</button></form>{settings.renderSettingsPresets.length > 0 && <div className="render-preset-list">{settings.renderSettingsPresets.map((preset) => <article key={preset.id}><span><strong>{preset.name}</strong><small>{preset.values.resolution.replace('x', ' × ')} · {preset.values.duration}s · {preset.values.turbo === 'off' ? `${preset.values.steps} steps` : `Turbo ${preset.values.turbo} · ${preset.values.turbo === '8' ? `${preset.values.steps} steps · ${preset.values.turbo8Profile}` : '4 steps'}`}</small></span><div><button type="button" className="secondary-button" onClick={() => applyRenderPreset(preset)}>Load</button><button type="button" className="icon-button" onClick={() => renameRenderPreset(preset)} aria-label={`Rename ${preset.name}`}><Pencil size={14} /></button><button type="button" className="icon-button" onClick={() => deleteRenderPreset(preset)} aria-label={`Delete ${preset.name}`}><Trash2 size={14} /></button></div></article>)}</div>}</div>
       <div className="generation-defaults-grid">
         <SelectField label="Default resolution" value={defaults.resolution} onChange={(resolution) => updateDefaults({ resolution })} options={['608x352', '864x480', '1056x608', '1344x768', '768x1344', '768x768'].map((value) => [value, value.replace('x', ' × ')])} />
         <NumberField label="Default duration (seconds)" value={defaults.duration} min={2} max={15} step={0.5} onChange={(duration) => updateDefaults({ duration })} />

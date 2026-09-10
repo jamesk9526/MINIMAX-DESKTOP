@@ -29,6 +29,8 @@ export type GenerationDefaults = {
   turbo8Profile: Turbo8Profile
 }
 
+export type RenderSettingsPreset = { id: string; name: string; values: GenerationDefaults; createdAt: number; updatedAt: number }
+
 export type AppSettings = {
   llmProvider: 'ollama' | 'lmstudio'
   comfyUrl: string
@@ -41,6 +43,7 @@ export type AppSettings = {
   outputDirectory: string
   ffmpegPath: string
   characterDetailReferencesEnabled: boolean
+  renderSettingsPresets: RenderSettingsPreset[]
   generationDefaults: GenerationDefaults
 }
 
@@ -70,7 +73,7 @@ export type CharacterProject = {
   hairPreset: string
   skinTone: string
 }
-export type CharacterDetailReference = { id: string; label: string; notes: string; image?: MediaFile }
+export type CharacterDetailReference = { id: string; label: string; notes: string; images: MediaFile[]; image?: MediaFile }
 export type WardrobeProject = { id: string; name: string; description: string; accessories: string[]; materials: string; colors: string; visualStyle: string; referencePrompt: string; referenceImages: MediaFile[]; selectedReferencePaths?: string[]; createdAt: number; updatedAt: number }
 export type AccessoryProject = { id: string; name: string; category: 'jewelry' | 'eyewear' | 'watch' | 'bag' | 'headwear' | 'prop' | 'other'; description: string; materials: string; colors: string; visualStyle: string; referencePrompt: string; referenceImage?: MediaFile; createdAt: number; updatedAt: number }
 export type HairStyleProject = { id: string; name: string; description: string; texture: string; length: string; color: string; hairline: string; finish: string; visualStyle: string; referencePrompt: string; referenceImage?: MediaFile; createdAt: number; updatedAt: number }
