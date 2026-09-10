@@ -4,6 +4,7 @@ export type ModelKind = 'diffusion_models' | 'text_encoders' | 'vae' | 'loras' |
 export type MediaKind = 'image' | 'video' | 'audio'
 export type UpscaleMode = 'off' | 'ltx' | 'rtx'
 export type Turbo8Profile = 'stable' | 'balanced' | 'motion'
+export type AttentionBackendPreference = 'automatic' | 'kitchen' | 'sage' | 'native'
 export type AppliedLora = { name: string; strength: number }
 export type ReferencePurpose = 'character' | 'character-angle' | 'detail' | 'hair' | 'wardrobe' | 'accessory' | 'location' | 'continuity' | 'product' | 'style' | 'generic'
 export type PromptPresetCategory = 'camera' | 'shot' | 'angle' | 'lens' | 'lighting' | 'audio' | 'style' | 'movement' | 'transition' | 'character' | 'wardrobe' | 'location'
@@ -44,6 +45,7 @@ export type AppSettings = {
   outputDirectory: string
   ffmpegPath: string
   uiScale: number
+  attentionBackend: AttentionBackendPreference
   experimentalLtxMsrEnabled: boolean
   queueDelaySeconds: number
   characterDetailReferencesEnabled: boolean
@@ -229,6 +231,7 @@ export type GenerationOptions = {
   steps: number
   turbo: 'off' | '4' | '8'
   experimentalSampling?: boolean
+  attentionBackend?: string
   previewOverride?: { frames: number; fps: number; nodeType?: string; vaeName?: string; jpegQuality?: number }
   loraStrength?: number
   userLoras?: AppliedLora[]

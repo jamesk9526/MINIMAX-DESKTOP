@@ -20,6 +20,7 @@ const settings: AppSettings = {
   outputDirectory: 'C:\\Users\\James\\Documents\\ComfyUI\\output',
   ffmpegPath: 'C:\\FFMPEG\\bin\\ffmpeg.exe',
   uiScale: 100,
+  attentionBackend: 'automatic',
   experimentalLtxMsrEnabled: false,
   queueDelaySeconds: 0,
   characterDetailReferencesEnabled: false,

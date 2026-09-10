@@ -65,6 +65,14 @@ export function buildMiniMaxWorkflow(
     prompt[id] = { class_type: 'LoraLoaderModelOnly', inputs: { model: modelLink, lora_name: lora.name, strength_model: lora.strength } }
     modelLink = [id, 0]
   })
+  // ModelAttentionBackend is a native ComfyUI model patch. It changes only the
+  // H3 model in this graph, so global server settings and unrelated workflows
+  // are left untouched. ComfyUI itself falls back when a requested backend is
+  // no longer available after an update.
+  if (options.attentionBackend) {
+    prompt['85'] = { class_type: 'ModelAttentionBackend', inputs: { model: modelLink, attention: options.attentionBackend } }
+    modelLink = ['85', 0]
+  }
   // Ref2VA Turbo 8-step v1.0 was trained at 768p with 6 / 3 shifts. This is
   // part of that adapter's recipe, not a user tuning preference, so it wins
   // over a stale custom-shift setting whenever this exact LoRA is selected.

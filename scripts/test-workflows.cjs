@@ -101,6 +101,12 @@ assert.equal(stackedLoras['91'].inputs.model[0], '90')
 assert.equal(stackedLoras['91'].inputs.lora_name, 'detail-pass.safetensors')
 assert.equal(stackedLoras['12'].inputs.model[0], '91')
 
+const kitchenAttentionGraph = buildMiniMaxWorkflow({ mode: 'reference', width: 1344, height: 768, prompt: 'test', duration: 5, seed: 1, steps: 8, turbo: '8', sampler: 'res_multistep', scheduler: 'simple', filenamePrefix: 'test', refImageSize: 'match', attentionBackend: 'comfy kitchen attention' }, models, { images: [{ name: 'ref.png' }], videos: [], audios: [] })
+assert.equal(kitchenAttentionGraph['85'].class_type, 'ModelAttentionBackend')
+assert.equal(kitchenAttentionGraph['85'].inputs.attention, 'comfy kitchen attention')
+assert.equal(kitchenAttentionGraph['12'].inputs.model[0], '85')
+assert.equal(kitchenAttentionGraph['14'].inputs.model[0], '85')
+
 const turboStable = buildMiniMaxWorkflow({ mode: 'text', width: 1344, height: 768, prompt: 'test', duration: 5, seed: 1, steps: 20, turbo: '8', sampler: 'euler', scheduler: 'simple', filenamePrefix: 'test', refImageSize: 'match' }, models, { images: [], videos: [], audios: [] })
 assert.equal(turboStable['13'].inputs.sampler_name, 'euler')
 assert.equal(turboStable['14'].inputs.scheduler, 'simple')

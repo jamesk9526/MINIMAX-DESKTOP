@@ -89,6 +89,7 @@ import { COPILOT_DECISION_EVENT, offerCopilotSuggestion } from './lib/copilot'
 import { resolveLlmConnection } from './lib/llmProvider'
 import type {
   AppSettings,
+  AttentionBackendPreference,
   AceStepGenerationOptions,
   CharacterProject,
   ComfyStatus,
@@ -448,6 +449,16 @@ function appendPromptAddition(current: string, addition: string) {
   return [base, next].filter(Boolean).join('\n\n')
 }
 
+function resolveH3AttentionBackend(preference: AttentionBackendPreference, available: string[]) {
+  const kitchen = available.find((value) => /comfy[ _-]?kitchen|kitchen.*int8|int8.*kitchen/i.test(value))
+  const sage = available.find((value) => /sage/i.test(value))
+  const native = available.find((value) => /pytorch|native|sdpa/i.test(value))
+  if (preference === 'kitchen') return kitchen
+  if (preference === 'sage') return sage
+  if (preference === 'native') return native
+  return kitchen ?? sage ?? native
+}
+
 function resolveRenderReferenceImages(files: MediaFile[], bindings: MovieReferenceBinding[], clothingPolicy: 'wardrobe' | 'underwear' | 'unrestricted') {
   if (!bindings.length) return files
   const activeBindings = clothingPolicy === 'wardrobe' ? bindings : bindings.filter((binding) => binding.purpose !== 'wardrobe')
@@ -490,6 +501,7 @@ function App() {
   const [userLoras, setUserLoras] = useState(() => persisted.userLoras.map((item) => ({ ...item })))
   const [info, setInfo] = useState<ObjectInfo>({})
   const h3PreviewOverrideNode = findH3PreviewOverrideNode(info)
+  const h3AttentionBackends = choices(info, 'ModelAttentionBackend', 'attention')
   const ltxSamplingPreviewOverrideNode = findLtxSamplingPreviewOverrideNode(info)
   const [liveEnabled, setLiveEnabled] = useState(persisted.liveEnabled)
   const [livePreviewMode, setLivePreviewMode] = useState<'standard' | 'h3-override'>(persisted.livePreviewMode)
@@ -1458,6 +1470,7 @@ function App() {
         refImageSize,
         sigmaShift: sigmaShiftMode === 'custom' ? { video: shiftVideo, audio: shiftAudio } : undefined,
         previewOverride: target === 'video' && liveEnabled && livePreviewMode === 'h3-override' && h3PreviewOverrideNode ? { frames: 50, fps: 12, nodeType: h3PreviewOverrideNode, vaeName: selection.previewVae, jpegQuality: 85 } : undefined,
+        attentionBackend: resolveH3AttentionBackend(settings.attentionBackend, h3AttentionBackends),
         filenamePrefix: target === 'image' ? `image/MiniMax_Ref2VA_Still_${Date.now()}` : `video/MiniMax_H3_${Date.now()}`,
         firstFrame: firstFrame?.path,
         lastFrame: lastFrame?.path,
@@ -2373,6 +2386,7 @@ function SettingsView({ settings, setSettings, info, models, h3Report, scanning,
   const settingsSections = [
     ['display', 'Display & access'],
     ['engine', 'ComfyUI engine'],
+    ['performance', 'Performance'],
     ['h3', 'H3 engine stack'],
     ['defaults', 'Render defaults'],
     ['assistant', 'Local AI'],
@@ -2411,10 +2425,16 @@ function SettingsView({ settings, setSettings, info, models, h3Report, scanning,
   const samplerOptions = [...new Set([defaults.sampler, 'res_multistep', 'euler', 'gradient_estimation', 'ipndm', 'deis', 'heun', ...choices(info, 'KSamplerSelect', 'sampler_name')])]
   const schedulerOptions = [...new Set([defaults.scheduler, 'simple', 'beta', 'normal', ...choices(info, 'BasicScheduler', 'scheduler')])]
   const warnedSampler = ['euler_ancestral', 'lcm', 'dpmpp_3m_sde'].includes(defaults.sampler)
+  const attentionBackends = choices(info, 'ModelAttentionBackend', 'attention')
+  const kitchenAttention = resolveH3AttentionBackend('kitchen', attentionBackends)
+  const sageAttention = resolveH3AttentionBackend('sage', attentionBackends)
+  const nativeAttention = resolveH3AttentionBackend('native', attentionBackends)
+  const selectedAttention = resolveH3AttentionBackend(settings.attentionBackend, attentionBackends)
   return <div className="standard-page settings-page"><div className="page-heading"><div><p className="eyebrow">APPLICATION</p><h1>Settings</h1><p>Organize your local engine, models, workspace scale, and output tools.</p></div><button className="primary-button" onClick={onSave}><Save size={17} />Save settings</button></div>
     <div className="settings-layout"><aside className="settings-sidebar" aria-label="Settings sections"><span>SETTINGS</span>{settingsSections.map(([id, label]) => <button key={id} type="button" className={activeSettingsSection === id ? 'active' : ''} onClick={() => openSettingsSection(id)}>{label}</button>)}</aside><div className="settings-content">
     <section className="settings-section settings-display-section" id="settings-display"><div className="settings-heading"><div><SlidersHorizontal size={19} /><span><strong>Display & access</strong><small>Make the workspace comfortable at your screen resolution and text size.</small></span></div><output>{settings.uiScale}%</output></div><div className="ui-scale-control"><div><label htmlFor="ui-scale">Interface scale</label><small>Changes the entire application immediately. The choice is saved with your local settings.</small></div><div><input id="ui-scale" type="range" min="75" max="150" step="5" value={settings.uiScale} onChange={(event) => { const uiScale = Number(event.target.value); setSettings({ ...settings, uiScale }); void window.minimax.setUiScale(uiScale / 100) }} /><div><button type="button" className="secondary-button" onClick={() => { setSettings({ ...settings, uiScale: 100 }); void window.minimax.setUiScale(1) }}>Reset to 100%</button><strong>{settings.uiScale}%</strong></div></div></div></section>
     <section className="settings-section" id="settings-engine"><div className="settings-heading"><div><Activity size={19} /><span><strong>ComfyUI engine</strong><small>The desktop app communicates only with this local address.</small></span></div><span className={`health-pill ${status.connected ? 'online' : ''}`}>{status.connected ? 'Connected' : 'Offline'}</span></div><div className="connection-row"><div className="field-group grow"><label htmlFor="comfy-url">Server URL</label><input id="comfy-url" value={settings.comfyUrl} onChange={(event) => setSettings({ ...settings, comfyUrl: event.target.value })} /></div><button className="secondary-button test-button" onClick={onCheck} disabled={checking}>{checking ? <LoaderCircle size={16} className="spin" /> : <RefreshCw size={16} />}Test connection</button></div>{status.connected && status.stats?.devices?.[0] && <div className="device-strip"><Gauge size={17} /><span><strong>{status.stats.devices[0].name ?? 'Compute device'}</strong><small>{status.stats.devices[0].vram_total ? `${formatBytes(status.stats.devices[0].vram_total)} VRAM · ${formatBytes(status.stats.devices[0].vram_free ?? 0)} free` : 'ComfyUI device detected'}</small></span></div>}</section>
+    <section className="settings-section performance-settings" id="settings-performance"><div className="settings-heading"><div><Gauge size={19} /><span><strong>Render performance</strong><small>Global H3 attention acceleration. The selected backend is added to every new H3 and Ref2VA graph.</small></span></div><span className={`health-pill ${selectedAttention ? 'online' : ''}`}>{selectedAttention ? 'Ready' : 'Setup needed'}</span></div><fieldset className="attention-backend-picker"><legend>Attention backend</legend><label className={settings.attentionBackend === 'automatic' ? 'selected' : ''}><input type="radio" name="attention-backend" checked={settings.attentionBackend === 'automatic'} onChange={() => setSettings({ ...settings, attentionBackend: 'automatic' })} /><span><strong>Automatic</strong><small>{kitchenAttention ? `Uses ${kitchenAttention} when detected, then SageAttention, then native.` : sageAttention ? `Uses ${sageAttention} when detected, then native.` : 'Uses the native backend until an accelerated backend is detected.'}</small></span></label><label className={settings.attentionBackend === 'kitchen' ? 'selected' : ''}><input type="radio" name="attention-backend" checked={settings.attentionBackend === 'kitchen'} onChange={() => setSettings({ ...settings, attentionBackend: 'kitchen' })} /><span><strong>Kitchen INT8</strong><small>{kitchenAttention ? `Detected: ${kitchenAttention}` : 'Not detected — the graph will safely use native attention.'}</small></span></label><label className={settings.attentionBackend === 'sage' ? 'selected' : ''}><input type="radio" name="attention-backend" checked={settings.attentionBackend === 'sage'} onChange={() => setSettings({ ...settings, attentionBackend: 'sage' })} /><span><strong>SageAttention</strong><small>{sageAttention ? `Detected: ${sageAttention}` : 'Requires SageAttention to be enabled by the running ComfyUI environment.'}</small></span></label><label className={settings.attentionBackend === 'native' ? 'selected' : ''}><input type="radio" name="attention-backend" checked={settings.attentionBackend === 'native'} onChange={() => setSettings({ ...settings, attentionBackend: 'native' })} /><span><strong>Native</strong><small>{nativeAttention ? `Detected: ${nativeAttention}` : 'Use ComfyUI’s standard attention implementation.'}</small></span></label></fieldset><div className="settings-note"><strong>ComfyUI Desktop setup</strong><br />After installing <code>comfy-kitchen</code>, restart ComfyUI Desktop and click <em>Test connection</em>. When <code>ModelAttentionBackend</code> reports a Kitchen option, MiniMax Studio automatically inserts it directly after the H3 model and before Ref2VA conditioning/sampling. Kitchen and Sage are alternatives: select one, never both.</div>{!attentionBackends.length && <p className="settings-warning"><AlertCircle size={15} />This ComfyUI server does not report <code>ModelAttentionBackend</code> yet. Update/restart ComfyUI Desktop, then test the connection again. No acceleration graph is sent until it is detected.</p>}</section>
     <section className="settings-section h3-stack-section" id="settings-h3">
       <div className="settings-heading"><div><Gauge size={19} /><span><strong>H3 engine stack</strong><small>Compares the selected files with the validated official ComfyUI stack.</small></span></div><span className={`health-pill ${h3Report.validated ? 'online' : ''}`}>{h3Report.validated ? 'Validated' : h3Report.ready ? 'Custom' : 'Incomplete'}</span></div>
       <div className="h3-stack-list">{h3Report.rows.map((row) => <div key={row.label} className={row.validated ? 'validated' : row.optional && !row.selected ? 'optional' : 'custom'}><span>{row.validated ? <Check size={14} /> : row.optional && !row.selected ? <Minus size={14} /> : <AlertCircle size={14} />}</span><div><strong>{row.label}</strong><small title={row.selected || row.expected}>{row.selected || `${row.optional ? 'Optional' : 'Missing'} · expected ${row.expected}`}</small></div><em>{row.validated ? 'Recommended' : row.selected ? 'Non-standard' : row.optional ? 'Optional' : 'Missing'}</em></div>)}</div>

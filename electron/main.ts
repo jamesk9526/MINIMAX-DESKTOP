@@ -43,6 +43,7 @@ type AppSettings = {
   outputDirectory: string
   ffmpegPath: string
   uiScale: number
+  attentionBackend: 'automatic' | 'kitchen' | 'sage' | 'native'
   experimentalLtxMsrEnabled: boolean
   queueDelaySeconds: number
   characterDetailReferencesEnabled: boolean
@@ -153,6 +154,7 @@ function defaultSettings(): AppSettings {
     outputDirectory: join(app.getPath('documents'), 'ComfyUI', 'output'),
     ffmpegPath: existsSync('C:\\FFMPEG\\bin\\ffmpeg.exe') ? 'C:\\FFMPEG\\bin\\ffmpeg.exe' : 'ffmpeg',
     uiScale: 100,
+    attentionBackend: 'automatic',
     experimentalLtxMsrEnabled: false,
     queueDelaySeconds: 0,
     characterDetailReferencesEnabled: false,
@@ -243,7 +245,8 @@ async function loadSettings(): Promise<AppSettings> {
     generationDefaults.turbo8Profile = raw.generationDefaults?.turbo8Profile === 'stable' || raw.generationDefaults?.turbo8Profile === 'motion' ? raw.generationDefaults.turbo8Profile : 'balanced'
     const uiScale = Math.max(75, Math.min(150, Number(raw.uiScale) || defaults.uiScale))
     const renderSettingsPresets = Array.isArray(raw.renderSettingsPresets) ? raw.renderSettingsPresets.filter((preset) => preset && typeof preset.name === 'string' && preset.name.trim()).slice(0, 30).map((preset) => ({ id: typeof preset.id === 'string' ? preset.id : randomUUID(), name: preset.name.trim().slice(0, 60), values: { ...generationDefaults, ...(preset.values ?? {}) }, createdAt: Number(preset.createdAt) || Date.now(), updatedAt: Number(preset.updatedAt) || Date.now() })) : []
-    return { ...defaults, ...raw, uiScale, queueDelaySeconds: Math.max(0, Math.min(600, Number(raw.queueDelaySeconds) || 0)), experimentalLtxMsrEnabled: raw.experimentalLtxMsrEnabled === true, llmProvider: raw.llmProvider === 'lmstudio' ? 'lmstudio' : 'ollama', characterDetailReferencesEnabled: raw.characterDetailReferencesEnabled === true, renderSettingsPresets, paths: { ...defaults.paths, ...raw.paths }, generationDefaults }
+    const attentionBackend = raw.attentionBackend === 'kitchen' || raw.attentionBackend === 'sage' || raw.attentionBackend === 'native' ? raw.attentionBackend : 'automatic'
+    return { ...defaults, ...raw, uiScale, attentionBackend, queueDelaySeconds: Math.max(0, Math.min(600, Number(raw.queueDelaySeconds) || 0)), experimentalLtxMsrEnabled: raw.experimentalLtxMsrEnabled === true, llmProvider: raw.llmProvider === 'lmstudio' ? 'lmstudio' : 'ollama', characterDetailReferencesEnabled: raw.characterDetailReferencesEnabled === true, renderSettingsPresets, paths: { ...defaults.paths, ...raw.paths }, generationDefaults }
   } catch {
     return defaultSettings()
   }
