@@ -32,6 +32,19 @@ function binaryPreviewImage(data: ArrayBuffer) {
   return null
 }
 
+function nodeStageLabel(node: string) {
+  if (/^UNETLoader$/i.test(node)) return 'Loading diffusion model'
+  if (/^(CLIPLoader|DualCLIPLoader)$/i.test(node)) return 'Loading text encoder'
+  if (/ModelAttentionBackend/i.test(node)) return 'Applying attention backend'
+  if (/LoraLoader/i.test(node)) return 'Applying LoRA adapters'
+  if (/MiniMaxH3.*(?:Reference|Image)ToVideo/i.test(node)) return 'Preparing H3 conditioning and references'
+  if (/SamplerCustomAdvanced|KSampler$/i.test(node)) return 'Starting sampler'
+  if (/VAEDecode/i.test(node)) return 'Decoding video frames'
+  if (/CreateVideo/i.test(node)) return 'Encoding video and audio'
+  if (/Save(?:Video|Image|Audio)/i.test(node)) return 'Saving output'
+  return `Processing ${node}`
+}
+
 export function useLivePreview(url: string | undefined, enabled: boolean, onProgress: (id: string, update: LiveProgress) => void) {
   const [clientId] = useState(createId)
   const [preview, setPreview] = useState<LivePreview | null>(null)
@@ -69,7 +82,7 @@ export function useLivePreview(url: string | undefined, enabled: boolean, onProg
             onProgress(active, { progress: 1, label: 'Starting workflow' })
           }
           if (msg.type === 'execution_cached') onProgress(promptId, { label: 'Reusing cached model data' })
-          if (msg.type === 'executing' && msg.data.node) onProgress(promptId, { label: 'Loading or processing workflow stage' })
+          if (msg.type === 'executing' && msg.data.node) onProgress(promptId, { label: nodeStageLabel(msg.data.node) })
           if (msg.type === 'progress' && msg.data.max) {
             const currentStep = Math.max(0, msg.data.value ?? 0)
             const totalSteps = msg.data.max

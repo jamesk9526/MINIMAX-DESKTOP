@@ -3,6 +3,7 @@ import { Check, CircleStop, ImagePlus, LoaderCircle, Plus, Scissors, Sparkles, T
 import { HAIR_LIBRARY_EVENT, loadHairStyleProjects, newHairStyleProject, saveHairStyleProjects } from '../lib/hairLibrary'
 import { choices, type ObjectInfo } from '../lib/comfyInfo'
 import { buildZImage } from '../lib/zimage'
+import { resolveAttentionBackend } from '../lib/attentionBackend'
 import type { AppSettings, HairStyleProject, MediaFile } from '../types'
 import { ReferenceApprovalModal } from './ReferenceApprovalModal'
 import { resolveLlmConnection } from '../lib/llmProvider'
@@ -55,7 +56,7 @@ export function HairStudio({ settings, info, connected, ollamaAvailable, onNotic
   const createReference = async () => {
     if (!zReady || busy || !active.name.trim()) return
     setBusy(true); setError(false); setMessage('Submitting the hairstyle design board…')
-    try { const response = await window.minimax.submitPrompt(settings.comfyUrl, buildZImage(prompt, 1024, 1024, Math.floor(Math.random() * 1_000_000_000), zModel, zEncoder, zVae)); setJob({ id: response.prompt_id, url: settings.comfyUrl, hairStyleId: active.id }); setMessage('Rendering the hairstyle in ComfyUI…') }
+    try { const response = await window.minimax.submitPrompt(settings.comfyUrl, buildZImage(prompt, 1024, 1024, Math.floor(Math.random() * 1_000_000_000), zModel, zEncoder, zVae, 8, 1, 'turbo', '', resolveAttentionBackend(settings.attentionBackend, choices(info, 'ModelAttentionBackend', 'attention')))); setJob({ id: response.prompt_id, url: settings.comfyUrl, hairStyleId: active.id }); setMessage('Rendering the hairstyle in ComfyUI…') }
     catch (cause) { setMessage(cause instanceof Error ? cause.message : String(cause)); setError(true); setBusy(false) }
   }
   const cancel = async () => { if (!job) return; try { await window.minimax.cancelPrompt(job.url, job.id) } finally { setJob(null); setBusy(false); setMessage('Hair design render cancelled.') } }

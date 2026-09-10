@@ -46,7 +46,7 @@ const preferredModel = (models: string[], variant: ZImageVariant) => models.find
   ?? (variant === 'turbo' ? 'z_image_turbo_bf16.safetensors' : 'z_image_bf16.safetensors')
 
 export function ZImageWorkspace({
-  url, info, connected, ollamaAvailable, llmProvider, ollamaUrl, ollamaModel, outputDirectory, onUse, onUseLtx,
+  url, info, connected, ollamaAvailable, llmProvider, ollamaUrl, ollamaModel, outputDirectory, attentionBackend, onUse, onUseLtx,
 }: {
   url: string
   info: ObjectInfo
@@ -56,6 +56,7 @@ export function ZImageWorkspace({
   ollamaUrl: string
   ollamaModel: string
   outputDirectory: string
+  attentionBackend?: string
   onUse(file: MediaFile, resolution: string): void
   onUseLtx(file: MediaFile): void
 }) {
@@ -147,7 +148,7 @@ export function ZImageWorkspace({
     setBusy(true); setResult(null); setError(false); setMessage(`Submitting ${variant === 'turbo' ? 'Z-Image Turbo' : 'Original Z-Image'} workflow…`)
     try {
       const [width, height] = resolution.split('x').map(Number)
-      const response = await window.minimax.submitPrompt(url, buildZImage(prompt.trim(), width, height, seed, model, encoder, vae, steps, guidance, variant, variant === 'base' ? negativePrompt.trim() : ''))
+      const response = await window.minimax.submitPrompt(url, buildZImage(prompt.trim(), width, height, seed, model, encoder, vae, steps, guidance, variant, variant === 'base' ? negativePrompt.trim() : '', attentionBackend))
       setJob({ id: response.prompt_id, url })
     } catch (caught) {
       setMessage(caught instanceof Error ? caught.message : String(caught)); setError(true); setBusy(false)

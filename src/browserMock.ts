@@ -83,6 +83,7 @@ export function installBrowserMock() {
     getSettings: async () => current,
     getGpuTelemetry: async () => ({ available: true, name: 'Preview GPU', usagePercent: 38, vramPercent: 62, vramUsedMb: 14880, vramTotalMb: 24000 }),
     saveSettings: async (next) => (current = next),
+    exportWorkflowJson: async (suggestedName) => `C:\\Users\\James\\Documents\\${suggestedName}`,
     setUiScale: async (scale) => Math.round(Math.max(.75, Math.min(1.5, scale)) * 100),
     chooseDirectory: async () => null,
     chooseMedia: async () => null,

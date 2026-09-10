@@ -24,8 +24,10 @@ export function inferAceStepSelections(models: ModelFile[]): AceStepModelSelecti
 export function buildAceStepWorkflow(options: AceStepGenerationOptions, models: AceStepModelSelection): ComfyPrompt {
   const diffusion = options.model === 'sft' ? models.sft : models.base
   const lyrics = options.instrumental ? '[Instrumental]' : options.lyrics.trim()
+  const model: [string, number] = options.attentionBackend ? ['85', 0] : ['1', 0]
   return {
     '1': { class_type: 'UNETLoader', inputs: { unet_name: diffusion, weight_dtype: 'default' } },
+    ...(options.attentionBackend ? { '85': { class_type: 'ModelAttentionBackend', inputs: { model: ['1', 0], attention: options.attentionBackend } } } : {}),
     '2': { class_type: 'DualCLIPLoader', inputs: { clip_name1: models.textEncoderSmall, clip_name2: models.textEncoderLarge, type: 'ace', device: 'default' } },
     '3': { class_type: 'VAELoader', inputs: { vae_name: models.vae } },
     '4': {
@@ -38,7 +40,7 @@ export function buildAceStepWorkflow(options: AceStepGenerationOptions, models: 
       },
     },
     '5': { class_type: 'ConditioningZeroOut', inputs: { conditioning: ['4', 0] } },
-    '6': { class_type: 'ModelSamplingAuraFlow', inputs: { model: ['1', 0], shift: 3 } },
+    '6': { class_type: 'ModelSamplingAuraFlow', inputs: { model, shift: 3 } },
     '7': { class_type: 'EmptyAceStep1.5LatentAudio', inputs: { seconds: options.duration, batch_size: 1 } },
     '8': {
       class_type: 'KSampler',

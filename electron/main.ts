@@ -673,6 +673,18 @@ app.whenReady().then(async () => {
     return lanStatus
   })
   ipcMain.handle('settings:save', (_event, settings: AppSettings) => saveSettings(settings))
+  ipcMain.handle('workflow:export-json', async (_event, suggestedName: string, workflow: unknown) => {
+    const safeName = basename(String(suggestedName || 'minimax-workflow.json')).replace(/[^a-z0-9._ -]/gi, '_')
+    const result = await dialog.showSaveDialog({
+      title: 'Export ComfyUI API workflow',
+      defaultPath: join(app.getPath('documents'), safeName.toLowerCase().endsWith('.json') ? safeName : `${safeName}.json`),
+      filters: [{ name: 'ComfyUI workflow JSON', extensions: ['json'] }],
+    })
+    if (result.canceled || !result.filePath) return null
+    const filePath = result.filePath.toLowerCase().endsWith('.json') ? result.filePath : `${result.filePath}.json`
+    await writeFile(filePath, `${JSON.stringify(workflow, null, 2)}\n`, 'utf8')
+    return filePath
+  })
   ipcMain.handle('window:set-ui-scale', (event, scale: number) => {
     const target = BrowserWindow.fromWebContents(event.sender)
     const value = Math.max(0.75, Math.min(1.5, Number(scale) || 1))

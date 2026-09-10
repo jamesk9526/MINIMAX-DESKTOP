@@ -3,6 +3,7 @@ import { Check, CircleStop, Glasses, ImagePlus, LoaderCircle, Plus, Sparkles, Tr
 import { ACCESSORY_LIBRARY_EVENT, loadAccessoryProjects, newAccessoryProject, saveAccessoryProjects } from '../lib/accessoryLibrary'
 import { choices, type ObjectInfo } from '../lib/comfyInfo'
 import { buildZImage } from '../lib/zimage'
+import { resolveAttentionBackend } from '../lib/attentionBackend'
 import type { AccessoryProject, AppSettings, MediaFile } from '../types'
 import { ReferenceApprovalModal } from './ReferenceApprovalModal'
 import { analyzeReferenceImage } from '../lib/referenceAnalysis'
@@ -29,7 +30,7 @@ export function AccessoryStudio({ settings, info, connected, onNotice }: { setti
   const createReference = async () => {
     if (!zReady || busy || !active.name.trim()) return
     setBusy(true); setMessage('Submitting one isolated accessory reference…')
-    try { const response = await window.minimax.submitPrompt(settings.comfyUrl, buildZImage(prompt, 768, 768, Math.floor(Math.random() * 1_000_000_000), zModel, zEncoder, zVae)); setJob({ id: response.prompt_id, url: settings.comfyUrl, accessoryId: active.id }); setMessage('Rendering the accessory in ComfyUI…') }
+    try { const response = await window.minimax.submitPrompt(settings.comfyUrl, buildZImage(prompt, 768, 768, Math.floor(Math.random() * 1_000_000_000), zModel, zEncoder, zVae, 8, 1, 'turbo', '', resolveAttentionBackend(settings.attentionBackend, choices(info, 'ModelAttentionBackend', 'attention')))); setJob({ id: response.prompt_id, url: settings.comfyUrl, accessoryId: active.id }); setMessage('Rendering the accessory in ComfyUI…') }
     catch (error) { setMessage(error instanceof Error ? error.message : String(error)); setBusy(false) }
   }
   const cancel = async () => { if (!job) return; try { await window.minimax.cancelPrompt(job.url, job.id) } finally { setJob(null); setBusy(false); setMessage('Accessory render cancelled.') } }

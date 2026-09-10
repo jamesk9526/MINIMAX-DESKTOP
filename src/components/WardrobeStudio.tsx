@@ -3,6 +3,7 @@ import { Check, CircleStop, ImagePlus, LoaderCircle, Plus, Shirt, Sparkles, Tras
 import { choices, type ObjectInfo } from '../lib/comfyInfo'
 import { loadWardrobeProjects, newWardrobeProject, saveWardrobeProjects, wardrobeReferences, WARDROBE_LIBRARY_EVENT } from '../lib/wardrobeLibrary'
 import { buildZImage } from '../lib/zimage'
+import { resolveAttentionBackend } from '../lib/attentionBackend'
 import type { AppSettings, MediaFile, WardrobeProject } from '../types'
 import { ReferenceApprovalModal } from './ReferenceApprovalModal'
 import { analyzeReferenceImage } from '../lib/referenceAnalysis'
@@ -36,7 +37,7 @@ export function WardrobeStudio({ settings, info, connected, onNotice }: { settin
   const createReference = async () => {
     if (!zReady || busy || !renderPrompt.trim()) return
     setBusy(true); setError(false); setMessage('Submitting the three-view outfit sheet to Z-Image Turbo…')
-    try { const response = await window.minimax.submitPrompt(settings.comfyUrl, buildZImage(renderPrompt, 1024, 1024, Math.floor(Math.random() * 1_000_000_000), zModel, zEncoder, zVae)); setJob({ id: response.prompt_id, url: settings.comfyUrl, wardrobeId: active.id }); setMessage('Constructing the wardrobe sheet in ComfyUI…') }
+    try { const response = await window.minimax.submitPrompt(settings.comfyUrl, buildZImage(renderPrompt, 1024, 1024, Math.floor(Math.random() * 1_000_000_000), zModel, zEncoder, zVae, 8, 1, 'turbo', '', resolveAttentionBackend(settings.attentionBackend, choices(info, 'ModelAttentionBackend', 'attention')))); setJob({ id: response.prompt_id, url: settings.comfyUrl, wardrobeId: active.id }); setMessage('Constructing the wardrobe sheet in ComfyUI…') }
     catch (reason) { setMessage(reason instanceof Error ? reason.message : String(reason)); setError(true); setBusy(false) }
   }
   const cancel = async () => { if (!job) return; try { await window.minimax.cancelPrompt(job.url, job.id); setMessage('Wardrobe render cancelled.') } catch (reason) { setMessage(reason instanceof Error ? reason.message : String(reason)); setError(true) } finally { setJob(null); setBusy(false) } }

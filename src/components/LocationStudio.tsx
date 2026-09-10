@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Building2, Camera, Check, CircleStop, Film, ImagePlus, Images, LoaderCircle, MapPin, Orbit, Play, Plus, Sparkles, Trash2, TreePine, WandSparkles, X } from 'lucide-react'
 import { choices, type ObjectInfo } from '../lib/comfyInfo'
 import { buildZImage } from '../lib/zimage'
+import { resolveAttentionBackend } from '../lib/attentionBackend'
 import { loadLocationProjects, locationReferences, newLocationProject, saveLocationProjects, LOCATION_LIBRARY_EVENT } from '../lib/locationLibrary'
 import type { AppSettings, GenerationJob, LocationProject, MediaFile } from '../types'
 import { ReferenceApprovalModal } from './ReferenceApprovalModal'
@@ -105,7 +106,7 @@ export function LocationStudio({ settings, info, connected, ollamaAvailable, aut
   const createMaster = async () => {
     if (!zReady || busy || !prompt.trim()) return
     setBusy(true); setError(false); setMessage('Submitting the location reference to Z-Image Turbo…')
-    try { const response = await window.minimax.submitPrompt(settings.comfyUrl, buildZImage(prompt, 1344, 768, Math.floor(Math.random() * 1_000_000_000), zModel, zEncoder, zVae)); setJob({ id: response.prompt_id, url: settings.comfyUrl, locationId: active.id }); setMessage('Constructing the location reference in ComfyUI…') }
+    try { const response = await window.minimax.submitPrompt(settings.comfyUrl, buildZImage(prompt, 1344, 768, Math.floor(Math.random() * 1_000_000_000), zModel, zEncoder, zVae, 8, 1, 'turbo', '', resolveAttentionBackend(settings.attentionBackend, choices(info, 'ModelAttentionBackend', 'attention')))); setJob({ id: response.prompt_id, url: settings.comfyUrl, locationId: active.id }); setMessage('Constructing the location reference in ComfyUI…') }
     catch (reason) { setMessage(reason instanceof Error ? reason.message : String(reason)); setError(true); setBusy(false) }
   }
   const cancel = async () => { if (!job) return; try { await window.minimax.cancelPrompt(job.url, job.id); setMessage('Location-reference render cancelled.') } catch (reason) { setMessage(reason instanceof Error ? reason.message : String(reason)); setError(true) } finally { setJob(null); setBusy(false) } }

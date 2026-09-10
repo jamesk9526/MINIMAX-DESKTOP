@@ -3,6 +3,7 @@ import { AlertCircle, Check, CircleStop, Film, ImagePlus, Images, LoaderCircle, 
 import { CHARACTER_LIBRARY_EVENT, characterReferences, loadCharacterProjects, newCharacterProject, saveCharacterProjects } from '../lib/characterLibrary'
 import { choices, type ObjectInfo } from '../lib/comfyInfo'
 import { buildZImage } from '../lib/zimage'
+import { resolveAttentionBackend } from '../lib/attentionBackend'
 import { loadWardrobeProjects, wardrobeReferences, WARDROBE_LIBRARY_EVENT } from '../lib/wardrobeLibrary'
 import { ACCESSORY_LIBRARY_EVENT, loadAccessoryProjects } from '../lib/accessoryLibrary'
 import { HAIR_LIBRARY_EVENT, loadHairStyleProjects } from '../lib/hairLibrary'
@@ -192,7 +193,7 @@ export function CharacterStudio({ settings, info, connected, ollamaAvailable, au
     if (!zReady || masterBusy || !renderPrompt.trim()) return
     setMasterBusy(true); setMasterError(false); setMasterMessage(target === 'sheet' ? 'Submitting the four-view character sheet to Z-Image Turbo…' : 'Submitting the master reference to Z-Image Turbo…')
     try {
-      const response = await window.minimax.submitPrompt(settings.comfyUrl, buildZImage(renderPrompt.trim(), target === 'sheet' ? 1024 : 768, target === 'sheet' ? 1024 : 1024, Math.floor(Math.random() * 1_000_000_000), zModel, zEncoder, zVae))
+      const response = await window.minimax.submitPrompt(settings.comfyUrl, buildZImage(renderPrompt.trim(), target === 'sheet' ? 1024 : 768, target === 'sheet' ? 1024 : 1024, Math.floor(Math.random() * 1_000_000_000), zModel, zEncoder, zVae, 8, 1, 'turbo', '', resolveAttentionBackend(settings.attentionBackend, choices(info, 'ModelAttentionBackend', 'attention'))))
       setMasterJob({ id: response.prompt_id, url: settings.comfyUrl, characterId: active.id, target })
       setMasterMessage(target === 'sheet' ? 'Constructing the character sheet in ComfyUI…' : 'Rendering the character master reference in ComfyUI…')
     } catch (error) {
@@ -203,7 +204,7 @@ export function CharacterStudio({ settings, info, connected, ollamaAvailable, au
     if (!zReady || masterBusy || !zPrompt.trim()) return
     setMasterBusy(true); setMasterError(false); setIdentityCandidates([]); setSelectedCandidatePaths([]); setCandidateStep('choose'); setApprovedFlowProject(null); setIdentitySurveyStartedAt(null); setMasterMessage(`Queueing ${count} distinct identity candidates…`)
     try {
-      const responses = await Promise.allSettled(Array.from({ length: count }, () => window.minimax.submitPrompt(settings.comfyUrl, buildZImage(zPrompt.trim(), 768, 1024, Math.floor(Math.random() * 1_000_000_000), zModel, zEncoder, zVae))))
+      const responses = await Promise.allSettled(Array.from({ length: count }, () => window.minimax.submitPrompt(settings.comfyUrl, buildZImage(zPrompt.trim(), 768, 1024, Math.floor(Math.random() * 1_000_000_000), zModel, zEncoder, zVae, 8, 1, 'turbo', '', resolveAttentionBackend(settings.attentionBackend, choices(info, 'ModelAttentionBackend', 'attention'))))))
       const queued = responses.flatMap((response) => response.status === 'fulfilled' ? [{ id: response.value.prompt_id, url: settings.comfyUrl, characterId: active.id }] : [])
       if (!queued.length) throw new Error(responses.find((response) => response.status === 'rejected')?.reason instanceof Error ? responses.find((response) => response.status === 'rejected')!.reason.message : 'No identity candidates could be queued.')
       setBatchJobs(queued)

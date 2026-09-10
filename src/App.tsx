@@ -55,6 +55,8 @@ import {
 } from 'lucide-react'
 import { buildMiniMaxReferenceStillWorkflow, buildMiniMaxWorkflow, extractOutputFile, extractOutputUrl, frameCount } from './lib/workflow'
 import { buildLtx25Workflow } from './lib/ltx25Workflow'
+import { buildZImage } from './lib/zimage'
+import { attentionBackendLabel, resolveAttentionBackend } from './lib/attentionBackend'
 import { appendLtxVisionGrounding, buildLtxImageHandoffPrompt } from './lib/ltxImageHandoff'
 import { ACE_STEP_REQUIRED_NODES, buildAceStepWorkflow, inferAceStepSelections } from './lib/aceStepWorkflow'
 import { fitWholeCharacter, prepareImage } from './lib/imageCrop'
@@ -89,7 +91,6 @@ import { COPILOT_DECISION_EVENT, offerCopilotSuggestion } from './lib/copilot'
 import { resolveLlmConnection } from './lib/llmProvider'
 import type {
   AppSettings,
-  AttentionBackendPreference,
   AceStepGenerationOptions,
   CharacterProject,
   ComfyStatus,
@@ -449,14 +450,41 @@ function appendPromptAddition(current: string, addition: string) {
   return [base, next].filter(Boolean).join('\n\n')
 }
 
-function resolveH3AttentionBackend(preference: AttentionBackendPreference, available: string[]) {
-  const kitchen = available.find((value) => /comfy[ _-]?kitchen|kitchen.*int8|int8.*kitchen/i.test(value))
-  const sage = available.find((value) => /sage/i.test(value))
-  const native = available.find((value) => /pytorch|native|sdpa/i.test(value))
-  if (preference === 'kitchen') return kitchen
-  if (preference === 'sage') return sage
-  if (preference === 'native') return native
-  return kitchen ?? sage ?? native
+function queuePromptState(queue: unknown, promptId: string): 'queued' | 'running' | null {
+  if (!queue || typeof queue !== 'object') return null
+  const source = queue as { queue_running?: unknown; queue_pending?: unknown }
+  const contains = (entries: unknown) => Array.isArray(entries) && entries.some((entry) => Array.isArray(entry) && String(entry[1]) === promptId)
+  return contains(source.queue_running) ? 'running' : contains(source.queue_pending) ? 'queued' : null
+}
+
+function queuePromptPosition(queue: unknown, promptId: string) {
+  if (!queue || typeof queue !== 'object') return undefined
+  const pending = (queue as { queue_pending?: unknown }).queue_pending
+  if (!Array.isArray(pending)) return undefined
+  const index = pending.findIndex((entry) => Array.isArray(entry) && String(entry[1]) === promptId)
+  return index >= 0 ? index + 1 : undefined
+}
+
+function comfyTerminalState(entry: { status?: { status_str?: string; completed?: boolean } } | undefined) {
+  const status = entry?.status?.status_str?.toLowerCase() ?? ''
+  if (entry?.status?.completed || /^(success|completed)$/.test(status)) return 'completed' as const
+  if (/(?:error|failed|cancelled|interrupted)/.test(status)) return 'failed' as const
+  return null
+}
+
+function modelPrecisionLabel(model?: string) {
+  if (!model) return undefined
+  if (/nvfp4/i.test(model)) return 'NVFP4'
+  if (/int8.*convrot|convrot.*int8/i.test(model)) return 'INT8 ConvRot'
+  if (/bf16/i.test(model)) return 'BF16'
+  if (/fp16/i.test(model)) return 'FP16'
+  if (/int8/i.test(model)) return 'INT8'
+  return undefined
+}
+
+function modelLabel(model?: string) {
+  if (!model) return undefined
+  return model.replace(/\.safetensors$/i, '').replace(/^minimax_h3_/i, 'H3 ').replace(/^ltx-2\.5-/i, 'LTX 2.5 ').replace(/[_-]+/g, ' ')
 }
 
 function resolveRenderReferenceImages(files: MediaFile[], bindings: MovieReferenceBinding[], clothingPolicy: 'wardrobe' | 'underwear' | 'unrestricted') {
@@ -502,6 +530,7 @@ function App() {
   const [info, setInfo] = useState<ObjectInfo>({})
   const h3PreviewOverrideNode = findH3PreviewOverrideNode(info)
   const h3AttentionBackends = choices(info, 'ModelAttentionBackend', 'attention')
+  const resolvedH3AttentionBackend = resolveAttentionBackend(settings?.attentionBackend ?? 'automatic', h3AttentionBackends)
   const ltxSamplingPreviewOverrideNode = findLtxSamplingPreviewOverrideNode(info)
   const [liveEnabled, setLiveEnabled] = useState(persisted.liveEnabled)
   const [livePreviewMode, setLivePreviewMode] = useState<'standard' | 'h3-override'>(persisted.livePreviewMode)
@@ -581,6 +610,7 @@ function App() {
         ...update,
         progress: update.progress ?? j.progress,
         status: 'running',
+        queueMissingAt: undefined,
         ...(advancedSamplerStep ? { lastSamplerStepAt: receivedAt, estimatedSamplerStepMs } : {}),
       }
     }))
@@ -782,9 +812,10 @@ function App() {
           const entry = history[promptId] as { status?: { status_str?: string; completed?: boolean; messages?: unknown[] } } | undefined
           const mediaType = job.mediaType ?? 'video'
           const outputUrl = playableOutputUrl(extractOutputUrl(history, promptId, settings.comfyUrl, mediaType))
-          if (entry?.status?.status_str === 'error') {
+          const terminalState = comfyTerminalState(entry)
+          if (terminalState === 'failed') {
             setJobs((current) => current.map((item) => item.id === job.id ? { ...item, status: 'failed', error: 'ComfyUI reported an execution error. The original may still be saved if upscaling failed.' } : item))
-          } else if (mediaType === 'image' && outputUrl && entry?.status?.completed) {
+          } else if (mediaType === 'image' && outputUrl && terminalState === 'completed') {
             const outputFile = extractOutputFile(history, promptId, 'image')
             if (!outputFile) return
             try {
@@ -794,7 +825,7 @@ function App() {
             } catch (error) {
               setJobs((current) => current.map((item) => item.id === job.id ? { ...item, status: 'failed', error: `The still rendered, but could not be saved locally: ${error instanceof Error ? error.message : String(error)}` } : item))
             }
-          } else if (outputUrl && entry?.status?.completed) {
+          } else if (outputUrl && terminalState === 'completed') {
             recordMovieOutput(job.movieLink, outputUrl)
             const localOutput = await window.minimax.findLatestOutput(settings.outputDirectory, job.createdAt, mediaType === 'audio' ? 'audio' : 'video')
             let extractionError: string | null = null
@@ -807,19 +838,30 @@ function App() {
             }
             if (extractionError) setNotice({ tone: 'error', text: `The video rendered, but its reference frames could not be extracted: ${extractionError}` })
             setJobs((current) => current.map((item) => item.id === job.id ? { ...item, status: 'completed', progress: 100, renderDurationMs: Date.now() - item.createdAt, outputUrl, localOutputPath: localOutput ?? undefined } : item))
-          } else if (entry?.status?.completed) {
+          } else if (terminalState === 'completed') {
             const localOutput = await window.minimax.findLatestOutput(settings.outputDirectory, job.createdAt, mediaType === 'audio' ? 'audio' : 'video')
             if (localOutput) recordMovieOutput(job.movieLink, localOutput)
             if (localOutput) recordCharacterTurntable(job.characterProjectId, localOutput)
             if (localOutput) recordLocationWalkthrough(job.locationProjectId, localOutput)
             const extractionError = localOutput && job.characterProjectId ? await extractAutomatedReferenceSet('character', job.characterProjectId, localOutput, job.duration, settings) : localOutput && job.locationProjectId ? await extractAutomatedReferenceSet('location', job.locationProjectId, localOutput, job.duration, settings) : null
             if (extractionError) setNotice({ tone: 'error', text: `The video rendered, but its reference frames could not be extracted: ${extractionError}` })
-            setJobs((current) => current.map((item) => item.id === job.id ? localOutput ? { ...item, status: 'completed', progress: 100, renderDurationMs: Date.now() - item.createdAt, outputUrl: localOutput, localOutputPath: localOutput } : { ...item, status: 'running', progress: 98 } : item))
-          } else {
-            setJobs((current) => current.map((item) => item.id === job.id ? { ...item, status: 'running' } : item))
+            setJobs((current) => current.map((item) => item.id === job.id ? localOutput ? { ...item, status: 'completed', progress: 100, renderDurationMs: Date.now() - item.createdAt, outputUrl: localOutput, localOutputPath: localOutput } : { ...item, status: 'failed', progress: 100, renderDurationMs: Date.now() - item.createdAt, error: 'ComfyUI completed this prompt, but no matching output was found. Check the output folder and ComfyUI history.' } : item))
           }
         }).catch(() => undefined)
       }
+      const checkedAt = Date.now()
+      void window.minimax.getQueue(settings.comfyUrl).then((queue) => setJobs((current) => current.map((job) => {
+        if (!job.promptId || !['queued', 'running'].includes(job.status)) return job
+        const queueState = queuePromptState(queue, job.promptId)
+        if (queueState === 'running') return job.status === 'running' && !job.queueMissingAt && !job.queuePosition ? job : { ...job, status: 'running', queueMissingAt: undefined, queuePosition: undefined, progressLabel: 'ComfyUI started rendering' }
+        if (queueState === 'queued') {
+          const queuePosition = queuePromptPosition(queue, job.promptId)
+          return job.status === 'queued' && !job.queueMissingAt && job.queuePosition === queuePosition ? job : { ...job, status: 'queued', queueMissingAt: undefined, queuePosition, progress: Math.min(job.progress, 8), progressLabel: 'Waiting in the ComfyUI queue' }
+        }
+        const missingSince = job.queueMissingAt ?? checkedAt
+        if (checkedAt - missingSince < 7_000) return { ...job, queueMissingAt: missingSince, progressLabel: 'Resolving ComfyUI completion…' }
+        return { ...job, status: 'failed', queueMissingAt: undefined, error: 'ComfyUI no longer reports this prompt in its queue or history. It may have been interrupted, cleared, or rejected before execution.' }
+      }))).catch(() => undefined)
     }, 1000)
     return () => window.clearInterval(timer)
   }, [pendingKey, settings, status.connected])
@@ -1262,7 +1304,8 @@ function App() {
     }
 
     const localId = createId()
-    const job: GenerationJob = { id: localId, provider: 'ltx25', mode: options.mode, prompt: options.prompt, createdAt: Date.now(), status: 'queued', progress: 2, progressLabel: input ? 'Preparing first frame' : 'Preparing workflow', width: options.width, height: options.height, duration: options.duration, characterProjectId: handoff?.characterProjectId ?? characterHandoff ?? undefined, locationProjectId: handoff?.locationProjectId }
+    const ltxAttentionBackend = resolveAttentionBackend(settings.attentionBackend, h3AttentionBackends)
+    const job: GenerationJob = { id: localId, provider: 'ltx25', mode: options.mode, prompt: options.prompt, createdAt: Date.now(), status: 'queued', progress: 2, progressLabel: input ? 'Preparing first frame' : 'Preparing workflow', width: options.width, height: options.height, duration: options.duration, execution: { diffusionModel: ltxSelection.diffusion, diffusionPrecision: modelPrecisionLabel(ltxSelection.diffusion), textEncoder: ltxSelection.textEncoder, attentionBackend: attentionBackendLabel(ltxAttentionBackend), sampler: 'Euler ancestral', scheduler: options.preset === 'quality' ? 'Official 8 + 3 sigmas' : 'Official distilled 8 sigmas', preview: options.previewOverride ? `LTX sampling · ${options.previewOverride.fps} fps` : 'Standard decoded frame', adapters: options.msr ? ['Licon MSR'] : [] }, characterProjectId: handoff?.characterProjectId ?? characterHandoff ?? undefined, locationProjectId: handoff?.locationProjectId }
     setJobs((current) => [job, ...current])
     selectActiveJob(localId)
     setLtxSubmitting(true)
@@ -1271,7 +1314,7 @@ function App() {
       const uploaded = input ? await window.minimax.uploadImageData(settings.comfyUrl, await prepareImage(input, options.width, options.height)) : undefined
       const uploadedMsrReferences = options.msr ? await Promise.all(options.msr.references.slice(0, 5).map((path) => window.minimax.uploadInput(settings.comfyUrl, path))) : []
       if (cancellationRequests.current.has(localId)) throw new Error('Generation cancelled before submission.')
-      const graph = buildLtx25Workflow(options, ltxSelection, uploaded, uploadedMsrReferences)
+      const graph = buildLtx25Workflow({ ...options, attentionBackend: ltxAttentionBackend }, ltxSelection, uploaded, uploadedMsrReferences)
       const response = await window.minimax.submitPrompt(settings.comfyUrl, graph, live.clientId)
       if (cancellationRequests.current.has(localId)) {
         await window.minimax.cancelPrompt(settings.comfyUrl, response.prompt_id)
@@ -1316,12 +1359,13 @@ function App() {
       id: localId, provider: 'acestep', mediaType: 'audio', mode: 'text', prompt: options.tags,
       createdAt: Date.now(), status: 'queued', progress: 2, progressLabel: 'Preparing ACE-Step workflow',
       width: 0, height: 0, duration: options.duration,
+      execution: { diffusionModel: options.model === 'sft' ? aceSelection.sft : aceSelection.base, attentionBackend: attentionBackendLabel(resolvedH3AttentionBackend), sampler: 'Euler + simple' },
     }
     setJobs((current) => [job, ...current])
     setAceSubmitting(true)
     setNotice({ tone: 'neutral', text: `Preparing the official ACE-Step XL ${options.model.toUpperCase()} ComfyUI graph…` })
     try {
-      const graph = buildAceStepWorkflow(options, aceSelection)
+      const graph = buildAceStepWorkflow({ ...options, attentionBackend: resolvedH3AttentionBackend }, aceSelection)
       const response = await window.minimax.submitPrompt(settings.comfyUrl, graph, live.clientId)
       if (cancellationRequests.current.has(localId)) {
         await window.minimax.cancelPrompt(settings.comfyUrl, response.prompt_id)
@@ -1435,6 +1479,18 @@ function App() {
       naturalMovement,
       loraStrength,
       userLoras: userLoras.filter((lora) => lora.name),
+      execution: {
+        diffusionModel: mode === 'reference' ? selection.ref2va : selection.fl2va,
+        diffusionPrecision: modelPrecisionLabel(mode === 'reference' ? selection.ref2va : selection.fl2va),
+        textEncoder: selection.textEncoder,
+        attentionBackend: attentionBackendLabel(resolvedH3AttentionBackend),
+        sampler: experimentalSampling ? sampler : turbo === '8' ? turbo8Profile === 'stable' ? 'euler' : 'res_multistep' : 'res_multistep',
+        scheduler: experimentalSampling ? scheduler : turbo === '8' && turbo8Profile === 'motion' ? 'beta' : 'simple',
+        preview: target === 'video' && liveEnabled ? livePreviewMode === 'h3-override' ? 'H3 animated · 50 frames · 12 fps' : 'Standard first frame' : 'Off',
+        upscale: target === 'video' ? upscaleMode === 'ltx' ? 'LTX latent · 2×' : upscaleMode === 'rtx' ? `RTX frames · 2× · ${rtxModel}` : 'Off' : undefined,
+        referenceCount: mode === 'reference' ? renderReferenceImages.length + referenceVideos.length + referenceAudios.length : undefined,
+        adapters: [turbo !== 'off' ? `Turbo ${turbo}` : '', ...userLoras.filter((lora) => lora.name).map((lora) => `${lora.name} · ${lora.strength}`)].filter(Boolean),
+      },
       movieLink: movieHandoff ?? undefined,
       characterProjectId: characterHandoff ?? undefined,
     }
@@ -1470,7 +1526,7 @@ function App() {
         refImageSize,
         sigmaShift: sigmaShiftMode === 'custom' ? { video: shiftVideo, audio: shiftAudio } : undefined,
         previewOverride: target === 'video' && liveEnabled && livePreviewMode === 'h3-override' && h3PreviewOverrideNode ? { frames: 50, fps: 12, nodeType: h3PreviewOverrideNode, vaeName: selection.previewVae, jpegQuality: 85 } : undefined,
-        attentionBackend: resolveH3AttentionBackend(settings.attentionBackend, h3AttentionBackends),
+        attentionBackend: resolvedH3AttentionBackend,
         filenamePrefix: target === 'image' ? `image/MiniMax_Ref2VA_Still_${Date.now()}` : `video/MiniMax_H3_${Date.now()}`,
         firstFrame: firstFrame?.path,
         lastFrame: lastFrame?.path,
@@ -1755,7 +1811,7 @@ function App() {
           onGenerate={(options) => void generateAceStep(options)}
           onCancel={(job) => void cancelJob(job)}
         />}
-        <div hidden={view !== 'zimage'}><ZImageWorkspace key={`first-frame-${zImageResetKey}`} url={settings.comfyUrl} info={info} connected={status.connected} ollamaAvailable={ollamaModels.length > 0} llmProvider={llmConnection.provider} ollamaUrl={llmConnection.url} ollamaModel={llmConnection.model} outputDirectory={settings.outputDirectory} onUse={(file, frameResolution) => {
+        <div hidden={view !== 'zimage'}><ZImageWorkspace key={`first-frame-${zImageResetKey}`} url={settings.comfyUrl} info={info} connected={status.connected} ollamaAvailable={ollamaModels.length > 0} llmProvider={llmConnection.provider} ollamaUrl={llmConnection.url} ollamaModel={llmConnection.model} outputDirectory={settings.outputDirectory} attentionBackend={resolvedH3AttentionBackend} onUse={(file, frameResolution) => {
           setFirstFrame(file); setResolution(frameResolution); setMode('image'); setActiveJobId(null); setView('create'); setNotice({ tone: 'success', text: 'Z-Image frame loaded into the MiniMax I2V workspace.' })
         }} onUseLtx={(file) => void sendGeneratedStillToLtx(file)} /></div>
         {view === 'characters' && <CharacterStudio settings={settings} info={info} connected={status.connected} ollamaAvailable={ollamaModels.length > 0} automationJobs={jobs.filter((job) => job.characterProjectId)} onCopilotContext={setCharacterCopilotContext} onNotice={(tone, text) => setNotice({ tone, text })} onCreateTurntable={(project) => {
@@ -2116,10 +2172,11 @@ function CreateView(props: CreateViewProps) {
           <div className="panel-heading"><div><span>OUTPUT</span><strong>Current workspace</strong></div>{latestJob && <StatusBadge status={latestJob.status} />}</div>
           {latestJob?.mediaType !== 'image' && liveEnabled && livePreview && livePreview.promptId === latestJob?.promptId && latestJob && ['running', 'queued'].includes(latestJob.status) && <figure className={`live-preview ${livePreview.animated ? 'animated' : ''}`}>{livePreview.mime === 'video/mp4' ? <video key={livePreview.url} src={livePreview.url} aria-label="Animated MiniMax H3 generation preview" autoPlay loop muted playsInline /> : <img key={livePreview.url} src={livePreview.url} alt={livePreview.animated ? 'Animated MiniMax H3 generation preview' : 'Live generation preview'} />}<figcaption>{livePreview.animated ? `Animated H3 preview · 50 frames${livePreview.fps ? ` · ${livePreview.fps} fps` : ''}${livePreview.step && livePreview.totalSteps ? ` · sampler step ${livePreview.step} of ${livePreview.totalSteps}` : ''}` : 'Live preview · intermediate frame'}</figcaption></figure>}
           <div className="preview-stage">
-            {latestJob?.outputUrl ? latestJob.mediaType === 'image' ? <img className="reference-still-output" src={latestJob.outputUrl} alt="Generated Ref2VA reference still" /> : <VideoPlayer src={latestJob.outputUrl} /> : latestJob && ['queued', 'running'].includes(latestJob.status) ? <div className="render-state constructing"><RenderConstruction /><strong>{latestJob.progressLabel ?? (latestJob.status === 'queued' ? 'Waiting in queue' : latestJob.mediaType === 'image' ? 'Generating one reference still' : 'Rendering locally')}</strong><span>{latestJob.currentStep !== undefined && latestJob.totalSteps ? `Live sampler step ${latestJob.currentStep} of ${latestJob.totalSteps}` : `${latestJob.width} × ${latestJob.height}${latestJob.mediaType === 'image' ? ' · one still' : ` · ${latestJob.duration}s`}`}</span><div className="progress"><i style={{ width: `${latestJob.progress}%` }} /></div><small>{Math.round(latestJob.progress)}% · live ComfyUI status</small></div> : <div className="empty-preview"><div className="preview-icon"><Film size={28} /></div><strong>Your video will appear here</strong><span>Configure a shot, then send it to the local engine.</span></div>}
+            {latestJob?.outputUrl ? latestJob.mediaType === 'image' ? <img className="reference-still-output" src={latestJob.outputUrl} alt="Generated Ref2VA reference still" /> : <VideoPlayer src={latestJob.outputUrl} /> : latestJob && ['queued', 'running'].includes(latestJob.status) ? <div className="render-state constructing" data-render-state={latestJob.status}><RenderConstruction state={latestJob.status} /><div className="render-status-kicker"><i />{latestJob.status === 'queued' ? 'Queued locally' : 'Local engine active'}</div><strong>{latestJob.progressLabel ?? (latestJob.status === 'queued' ? 'Waiting in queue' : latestJob.mediaType === 'image' ? 'Generating one reference still' : 'Rendering locally')}</strong><span>{latestJob.currentStep !== undefined && latestJob.totalSteps ? `Live sampler step ${latestJob.currentStep} of ${latestJob.totalSteps}` : `${latestJob.width} × ${latestJob.height}${latestJob.mediaType === 'image' ? ' · one still' : ` · ${latestJob.duration}s`}`}</span><div className="progress"><i style={{ width: `${latestJob.progress}%` }} /></div><div className="render-stage-rail" aria-label={`Render status: ${latestJob.status === 'queued' ? 'queued' : 'sampling'}`}><span className="complete">Prepared</span><span className={latestJob.status === 'queued' ? 'active' : 'complete'}>Queued</span><span className={latestJob.status === 'running' ? 'active' : ''}>Rendering</span><span>Output</span></div><small>{Math.round(latestJob.progress)}% · live ComfyUI status</small></div> : <div className="empty-preview"><div className="preview-icon"><Film size={28} /></div><strong>Your video will appear here</strong><span>Configure a shot, then send it to the local engine.</span></div>}
           </div>
           {latestJob?.mediaType !== 'image' && latestJob?.provider === 'minimax' && latestJob.status === 'completed' && latestJob.outputUrl && <VideoContinuationControls job={latestJob} onContinue={onContinue} />}
           {latestJob?.mediaType === 'image' && latestJob.status === 'completed' && latestJob.outputUrl && <div className="still-result-actions"><a className="secondary-button" href={latestJob.outputUrl} target="_blank" rel="noreferrer"><ExternalLink size={15} />Open image</a><div className="still-i2v-actions"><span><ImagePlus size={15} />Send to I2V</span><button className="primary-button" onClick={() => onSendStillToI2v(latestJob, 'ltx25')}><Aperture size={15} />LTX 2.5</button><button className="secondary-button" onClick={() => onSendStillToI2v(latestJob, 'minimax')}><Film size={15} />MiniMax I2V</button></div></div>}
+          {latestJob && <JobExecutionChips job={latestJob} expanded />}
           <div className="pipeline-summary">
             <PipelineItem ready={Boolean(mode === 'reference' ? selection.ref2va : selection.fl2va)} label="Diffusion" value={mode === 'reference' ? selection.ref2va : selection.fl2va} />
             <PipelineItem ready={Boolean(selection.textEncoder)} label="Encoder" value={selection.textEncoder} />
@@ -2138,7 +2195,7 @@ function CreateView(props: CreateViewProps) {
             <section className="ref2va-setting-group ref2va-adapter-group" aria-labelledby="user-lora-title"><div className="ref2va-setting-heading"><span>02</span><div><strong>Adapters</strong><small>Add compatible ComfyUI LoRAs after the selected H3 recipe.</small></div></div><section className="user-lora-slots"><div><span><strong id="user-lora-title">Additional ComfyUI LoRAs</strong><small>Apply up to three adapters from your configured LoRAs folder.</small></span><em>{userLoras.filter((slot) => slot.name).length}/3 selected</em></div>{userLoras.map((slot, index) => <div className="user-lora-slot" key={index}><label>LoRA {index + 1}<select value={slot.name} disabled={!userLoraChoices.length} onChange={(event) => setUserLoraSlot(index, { name: event.target.value })}><option value="">No additional LoRA</option>{userLoraChoices.filter((name) => name === slot.name || !userLoras.some((other, otherIndex) => otherIndex !== index && other.name === name)).map((name) => <option key={name} value={name}>{name}</option>)}</select></label><NumberField label="Strength" value={slot.strength} min={0} max={2} step={0.05} disabled={!slot.name} onChange={(strength) => setUserLoraSlot(index, { strength })} /></div>)}<p className="field-help">Official H3 Turbo LoRAs stay automatic and do not consume these slots. Additional adapters are loaded after Turbo; use short fixed-seed tests because unsupported model adapters can reduce stability.</p>{!userLoraChoices.length && <p className="field-help">No extra LoRAs were found. Add compatible files to the configured ComfyUI LoRAs folder, then rescan in Settings.</p>}</section></section>
             <section className="ref2va-setting-group" aria-labelledby="preview-finish-title"><div className="ref2va-setting-heading"><span>03</span><div><strong id="preview-finish-title">Preview and finish</strong><small>Choose what to watch while sampling and what happens after rendering.</small></div></div><div className="render-extras"><div className="ref2va-subsection-title">During the render</div><label><input type="checkbox" checked={liveEnabled} onChange={(event) => setLiveEnabled(event.target.checked)} />Live preview <small>{liveEnabled ? liveConnected ? 'Connected · waiting for preview frames' : 'Connecting to ComfyUI…' : 'Off'}</small></label><label className="live-preview-mode"><span>Preview source</span><select value={livePreviewMode} disabled={!liveEnabled} onChange={(event) => setLivePreviewMode(event.target.value as 'standard' | 'h3-override')}><option value="standard">Standard first frame</option><option value="h3-override">MiniMax H3 animated · 50 frames at 12 fps</option></select></label><p className={`field-help ${livePreviewMode === 'h3-override' && !h3PreviewOverrideAvailable ? 'upscale-warning' : ''}`}>{livePreviewMode === 'h3-override' && h3PreviewOverrideAvailable ? 'The installed MiniMax H3 Preview Override node is wired between the model and sampler and streams a 50-frame, 12 fps animated preview.' : livePreviewMode === 'h3-override' ? 'Animated preview is selected, but the required Preview Override node is not detected. Install or enable it, restart ComfyUI, then click the Local engine status to refresh before generating.' : h3PreviewOverrideAvailable ? 'MiniMax H3 Preview Override is installed. Select the animated option to preview motion while sampling.' : 'You can select animated preview now. Generation will wait until the MiniMax H3 Preview Override custom node is installed and detected.'}</p><div className="ref2va-subsection-title after-render">After the render</div><div className="upscale-options" role="group" aria-labelledby="upscale-label"><span id="upscale-label">Post-render upscale</span><label><input type="radio" name="upscale" checked={upscaleMode === 'off'} onChange={() => setUpscaleMode('off')} />Off</label><label><input type="radio" name="upscale" checked={upscaleMode === 'ltx'} disabled={!ltxAvailable} onChange={() => setUpscaleMode('ltx')} />LTX 2.5 latent · 2×</label><label><input type="radio" name="upscale" checked={upscaleMode === 'rtx'} disabled={rtxModels.length === 0} onChange={() => setUpscaleMode('rtx')} />RTX / CUDA frames · 2× · experimental</label></div>{upscaleMode === 'rtx' && <SelectField label="AI upscale model" value={rtxModel} onChange={setRtxModel} options={rtxModels.map((name) => [name, name])} />}<p className={`field-help ${upscaleMode === 'rtx' ? 'upscale-warning' : ''}`}>{upscaleMode === 'ltx' ? `Verified latent pipeline: MiniMax frames are encoded with the LTX‑2.5 video VAE, spatially upsampled exactly 2× in latent space, decoded, trimmed to the original duration, and joined to the untouched MiniMax audio. Final size: ${resolution.split('x').map((value) => Number(value) * 2).join(' × ')}.` : upscaleMode === 'rtx' ? `Experimental frame-by-frame upscale using ${rtxModel || 'the selected model'}. It does not understand motion and can amplify noise, flicker, or temporal shimmer. Diagnose output quality with upscale Off first.` : !ltxAvailable && ltxMissingNodes.length ? `LTX 2× is unavailable until ComfyUI provides: ${ltxMissingNodes.join(', ')}.` : !ltxAvailable && rtxModels.length === 0 ? 'No compatible upscale models were reported by ComfyUI.' : 'The original MiniMax video is saved without post-processing.'}</p></div></section>
             <button className="advanced-toggle" onClick={() => setAdvanced(!advanced)} aria-expanded={advanced}><SlidersHorizontal size={16} />Advanced controls<ChevronDown size={15} className={advanced ? 'rotated' : ''} /></button>
-            {advanced && <div className="advanced-grid"><SelectField label="Text encoder" value={textEncoderPreference} onChange={(value) => setTextEncoderPreference(value as 'fast' | 'quality')} options={[["fast", 'Fast · NVFP4-AWQ · 15.7 GB'], ["quality", 'Slower · better encoding · INT8 ConvRot · 27.1 GB']]} /><p className="field-help">The slower quality option requires <strong>qwen3vl_32b_minimax_h3_int8_convrot.safetensors</strong> in Text encoders. It is never selected unless you choose it.</p><NumberField label="Full-quality steps" value={steps} min={16} max={30} onChange={setSteps} disabled={turbo !== 'off'} /><NumberField label="Seed" value={seed} min={0} max={999999999999} onChange={setSeed} /><NumberField label="LoRA strength" value={loraStrength} min={0} max={2} step={0.05} onChange={setLoraStrength} disabled={turbo === 'off'} /><label className="sampling-opt-in"><input type="checkbox" checked={experimentalSampling} onChange={(event) => setExperimentalSampling(event.target.checked)} />Use custom sampler and scheduler</label><SelectField label="Experimental Turbo override" value={turbo} onChange={(value) => setTurbo(value as 'off' | '4' | '8')} options={[["off", 'Off · native quality'], ["8", 'Official 8-step'], ["4", '4-step · preview testing']]} /><SelectField label="Sampler" value={experimentalSampling ? sampler : turbo === '8' && turbo8Profile === 'stable' ? 'euler' : 'res_multistep'} onChange={setSampler} disabled={!experimentalSampling} options={[...new Set([sampler, 'euler', 'res_multistep', ...choices(info, 'KSamplerSelect', 'sampler_name')])].map((value) => [value, value])} /><SelectField label="Scheduler" value={experimentalSampling ? scheduler : turbo === '8' && turbo8Profile === 'motion' ? 'beta' : 'simple'} onChange={setScheduler} disabled={!experimentalSampling} options={[...new Set([scheduler, 'simple', 'beta', ...choices(info, 'BasicScheduler', 'scheduler')])].map((value) => [value, value])} /><SelectField label="Sigma shifts" value={sigmaShiftMode} onChange={(value) => setSigmaShiftMode(value as 'model' | 'custom')} options={[["model", ref2vaTurbo8TrainingShifts ? 'Ref2VA Turbo 8 recipe · video 6 / audio 3' : 'Model defaults · video 12 / audio 3'], ["custom", 'Custom official sigma-shift node']]} /><NumberField label="Video sigma shift" value={ref2vaTurbo8TrainingShifts ? 6 : shiftVideo} min={0.01} max={100} step={0.01} onChange={setShiftVideo} disabled={sigmaShiftMode !== 'custom' || ref2vaTurbo8TrainingShifts} /><NumberField label="Audio sigma shift" value={ref2vaTurbo8TrainingShifts ? 3 : shiftAudio} min={0.01} max={100} step={0.01} onChange={setShiftAudio} disabled={sigmaShiftMode !== 'custom' || ref2vaTurbo8TrainingShifts} /><p className="field-help">Turbo 8 profiles execute as shown: Stable uses Euler + Simple for faces and dialogue; Balanced uses res_multistep + Simple; Motion uses res_multistep + Beta. Full quality retains <strong>res_multistep + simple</strong>, CFG 1, denoise 1, and native shifts. Other sampler combinations remain experimental and should be compared at a fixed seed.</p></div>}
+            {advanced && <div className="advanced-grid"><SelectField label="Text encoder" value={textEncoderPreference} onChange={(value) => setTextEncoderPreference(value as 'fast' | 'quality')} options={[["fast", 'Fast · NVFP4-AWQ · 15.7 GB'], ["quality", 'Slower · better encoding · INT8 ConvRot · 27.1 GB']]} /><p className="field-help">The slower quality option requires <strong>qwen3vl_32b_minimax_h3_int8_convrot.safetensors</strong> in Text encoders. It is never selected unless you choose it.</p><NumberField label="Full-quality steps" value={steps} min={16} max={30} onChange={setSteps} disabled={turbo !== 'off'} /><NumberField label="Seed" value={seed} min={0} max={999999999999} onChange={setSeed} /><div className="turbo-lora-weight"><NumberField label="Official Turbo LoRA weight" value={loraStrength} min={0} max={2} step={0.05} onChange={setLoraStrength} disabled={turbo === 'off'} /><small>Controls the automatic official Turbo adapter only. It does not change the Additional ComfyUI LoRAs above.</small></div><label className="sampling-opt-in"><input type="checkbox" checked={experimentalSampling} onChange={(event) => setExperimentalSampling(event.target.checked)} />Use custom sampler and scheduler</label><SelectField label="Experimental Turbo override" value={turbo} onChange={(value) => setTurbo(value as 'off' | '4' | '8')} options={[["off", 'Off · native quality'], ["8", 'Official 8-step'], ["4", '4-step · preview testing']]} /><SelectField label="Sampler" value={experimentalSampling ? sampler : turbo === '8' && turbo8Profile === 'stable' ? 'euler' : 'res_multistep'} onChange={setSampler} disabled={!experimentalSampling} options={[...new Set([sampler, 'euler', 'res_multistep', ...choices(info, 'KSamplerSelect', 'sampler_name')])].map((value) => [value, value])} /><SelectField label="Scheduler" value={experimentalSampling ? scheduler : turbo === '8' && turbo8Profile === 'motion' ? 'beta' : 'simple'} onChange={setScheduler} disabled={!experimentalSampling} options={[...new Set([scheduler, 'simple', 'beta', ...choices(info, 'BasicScheduler', 'scheduler')])].map((value) => [value, value])} /><SelectField label="Sigma shifts" value={sigmaShiftMode} onChange={(value) => setSigmaShiftMode(value as 'model' | 'custom')} options={[["model", ref2vaTurbo8TrainingShifts ? 'Ref2VA Turbo 8 recipe · video 6 / audio 3' : 'Model defaults · video 12 / audio 3'], ["custom", 'Custom official sigma-shift node']]} /><NumberField label="Video sigma shift" value={ref2vaTurbo8TrainingShifts ? 6 : shiftVideo} min={0.01} max={100} step={0.01} onChange={setShiftVideo} disabled={sigmaShiftMode !== 'custom' || ref2vaTurbo8TrainingShifts} /><NumberField label="Audio sigma shift" value={ref2vaTurbo8TrainingShifts ? 3 : shiftAudio} min={0.01} max={100} step={0.01} onChange={setShiftAudio} disabled={sigmaShiftMode !== 'custom' || ref2vaTurbo8TrainingShifts} /><p className="field-help">Turbo 8 profiles execute as shown: Stable uses Euler + Simple for faces and dialogue; Balanced uses res_multistep + Simple; Motion uses res_multistep + Beta. Full quality retains <strong>res_multistep + simple</strong>, CFG 1, denoise 1, and native shifts. Other sampler combinations remain experimental and should be compared at a fixed seed.</p></div>}
             <p className="field-help render-duration">{frameCount(duration)} frames · {(frameCount(duration) / 24).toFixed(2)}s actual duration at 24 fps. Rounded up to MiniMax’s frame grid.</p>
           </section>
           <div className="generate-bar preview-generate-bar"><div className="generation-summary"><Gauge size={17} /><span><strong>{resolution.replace('x', ' × ')}</strong><small>{duration}s · 24 fps · {turbo === 'off' ? `${steps} steps` : `${turbo}-step turbo`}</small></span></div><div className="generate-actions">{latestJob && ['queued', 'running'].includes(latestJob.status) && <button className="danger-button" onClick={() => onCancel(latestJob)} disabled={cancelling}><CircleStop size={16} />{cancelling ? 'Stopping…' : latestJob.mediaType === 'image' ? 'Cancel image' : 'Cancel generation'}</button>}<button className="primary-button generation-button" onClick={onGenerate} disabled={submitting || !connected || !modelReady}>{submitting ? <LoaderCircle size={18} className="spin" /> : <Play size={18} fill="currentColor" />}{submitting ? 'Submitting…' : 'Generate video'}</button>{mode === 'reference' && <button className="secondary-button generation-image-button" onClick={onGenerateImage} disabled={stillSubmitting || !connected || !modelReady}>{stillSubmitting ? <LoaderCircle size={16} className="spin" /> : <ImagePlus size={16} />}{stillSubmitting ? 'Generating image…' : 'Generate image'}</button>}</div></div>
@@ -2316,7 +2373,7 @@ const workspaceTips: Record<View, { title: string; description: string; tips: Ar
 const setupGuide: Array<[string, string]> = [
   ['1. Core engine and folders', 'Install a current local ComfyUI build and keep it running at the address shown in Settings (default http://127.0.0.1:8188). In Settings → Model locations, point diffusion_models, text_encoders, vae, loras, vae_approx, and clip_vision at your ComfyUI model folders, then choose an output folder and click Test connection / Rescan.'],
   ['2. MiniMax H3 video', 'Required for Create: models/diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors and minimax_h3_ref2va_pruned_int8_convrot.safetensors; models/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors; models/vae/minimax_h3_video_vae_fp16.safetensors and minimax_h3_audio_vae_fp32.safetensors. The app requires a current ComfyUI exposing the MiniMax H3 core nodes.'],
-  ['3. H3 Turbo and animated preview', 'Turbo additionally needs models/loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors and minimax_h3_ref2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors. The older Ref2V 4-step LoRA is optional. The quality text-encoder choice additionally needs qwen3vl_32b_minimax_h3_int8_convrot.safetensors. H3 animated preview is optional and needs a compatible MiniMax H3 Preview Override node plus models/vae_approx/taeh3_decoder.safetensors.'],
+  ['3. H3 Turbo and animated preview', 'Turbo additionally needs models/loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors and minimax_h3_ref2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors. The older Ref2V 4-step LoRA is optional. The quality text-encoder choice additionally needs qwen3vl_32b_minimax_h3_int8_convrot.safetensors. H3 animated preview is optional and needs a compatible MiniMax H3 Preview Override node plus that node’s own 24-latent-channel taeh3_decoder.safetensors in models/vae_approx. A decoder.22 3-versus-12 output-shape warning means a different same-named TAE was installed; replace it with the decoder distributed with the active H3 Preview Override node.'],
   ['4. Native LTX 2.5', 'Required for the LTX workspace: models/diffusion_models/ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors (NVFP4/distilled variants are also detected); models/text_encoders/gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors; models/vae/ltx-2.5-video-vae-bf16.safetensors and ltx-2.5-audio-vae-bf16.safetensors; and models/latent_upscale_models/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors.'],
   ['5. LTX node gate and sampling preview', 'Current ComfyUI must expose LTXVConditioning, LTXVEmptyLatentAudio, EmptyLTXVLatentVideo, LTXVDualCFGGuider, LTXVSeparateAVLatent, LTXVConcatAVLatent, LTXVLatentUpsampler, LTXVAudioVAEDecode, ManualSigmas, VAEDecodeTiled, CLIPTextEncode, KSamplerSelect, and SamplerCustomAdvanced. Sampling-time LTX previews are optional and require ComfyUI-KJNodes, which provides LTX2SamplingPreviewOverride. Restart ComfyUI and refresh the Local engine after installing it.'],
   ['6. LTX and MiniMax 2× upscale', 'LTX latent 2× post-processing also requires VAEEncodeTiled, LatentUpscaleModelLoader, LTXVLatentUpsampler, VAEDecodeTiled, ImageFromBatch, RepeatImageBatch, and ImageBatch. An RTX/CUDA frame-upscale choice requires any compatible UpscaleModelLoader model; it is optional and can introduce flicker.'],
@@ -2338,6 +2395,25 @@ function WorkspaceTips({ view, onClose }: { view: View; onClose(): void }) {
 
 function StatusBadge({ status }: { status: GenerationJob['status'] }) {
   return <span className={`status-badge ${status}`}>{status === 'running' && <LoaderCircle size={12} className="spin" />}{status}</span>
+}
+
+function JobExecutionChips({ job, expanded = false }: { job: GenerationJob; expanded?: boolean }) {
+  const execution = job.execution
+  if (!execution) return null
+  const chips = [
+    execution.attentionBackend && { label: execution.attentionBackend, emphasis: /int8 attention|sage/i.test(execution.attentionBackend) },
+    execution.diffusionPrecision && { label: execution.diffusionPrecision },
+    execution.sampler && { label: `${execution.sampler} + ${execution.scheduler ?? 'scheduler'}` },
+    execution.preview && { label: `Preview: ${execution.preview}` },
+    execution.upscale && execution.upscale !== 'Off' && { label: execution.upscale },
+    execution.referenceCount !== undefined && { label: `${execution.referenceCount} reference${execution.referenceCount === 1 ? '' : 's'}` },
+    ...(execution.adapters?.map((adapter) => ({ label: adapter })) ?? []),
+    ...(expanded ? [
+      execution.diffusionModel && { label: `Model: ${modelLabel(execution.diffusionModel)}`, detail: execution.diffusionModel },
+      execution.textEncoder && { label: `Encoder: ${modelPrecisionLabel(execution.textEncoder) ?? modelLabel(execution.textEncoder)}`, detail: execution.textEncoder },
+    ] : []),
+  ].filter((chip): chip is { label: string; emphasis?: boolean; detail?: string } => Boolean(chip))
+  return chips.length ? <div className={`job-execution-chips ${expanded ? 'expanded' : ''}`} aria-label="Render configuration">{chips.map((chip) => <span key={`${chip.label}-${chip.detail ?? ''}`} className={chip.emphasis ? 'accelerated' : ''} title={chip.detail ?? chip.label}>{chip.label}</span>)}</div> : null
 }
 
 function LibraryView({ jobs, settings, onEdit, onUseLtx, onNotice }: { jobs: GenerationJob[]; settings: AppSettings; onEdit(): void; onUseLtx(file: MediaFile): void; onNotice(tone: 'error' | 'success' | 'neutral', text: string): void }) {
@@ -2364,7 +2440,7 @@ function LibraryView({ jobs, settings, onEdit, onUseLtx, onNotice }: { jobs: Gen
 }
 
 function JobsView({ title, note, jobs, empty, cancellingIds, onCancel }: { title: string; note: string; jobs: GenerationJob[]; empty: string; cancellingIds: Set<string>; onCancel(job: GenerationJob): Promise<void> }) {
-  return <div className="standard-page"><div className="page-heading"><div><p className="eyebrow">LOCAL WORKSPACE</p><h1>{title}</h1><p>{note}</p></div></div>{jobs.length === 0 ? <div className="empty-page"><History size={28} /><strong>{empty}</strong><span>New work is saved automatically on this device.</span></div> : <div className="job-list">{jobs.map((job) => { const audio = job.mediaType === 'audio'; const image = job.mediaType === 'image'; return <article className={`job-row ${['running', 'queued'].includes(job.status) ? 'constructing' : ''}`} key={job.id}><div className={`job-thumbnail ${audio ? 'audio' : ''}`}>{job.outputUrl ? audio ? <Music2 /> : image ? <img src={job.outputUrl} alt="Generated reference still" /> : <video src={job.outputUrl} muted /> : job.status === 'running' ? <LoaderCircle className="spin" /> : audio ? <Music2 /> : image ? <ImageIcon /> : <Film />}</div><div className="job-copy"><div><StatusBadge status={job.status} /><span>{new Date(job.createdAt).toLocaleString()}</span></div><strong>{shortPrompt(job.prompt)}</strong><small>{audio ? `ACE-Step · ${job.duration}s · audio` : `${job.width} × ${job.height} · ${image ? 'Ref2VA still' : `${job.duration}s · ${job.mode}`}`}</small>{job.outputUrl && audio && <audio className="job-audio" src={job.outputUrl} controls preload="metadata" />}{['running', 'queued'].includes(job.status) && <><small className="job-progress-label">{job.progressLabel ?? (job.status === 'queued' ? 'Waiting in queue' : audio ? 'Generating music locally' : image ? 'Generating one reference still' : 'Rendering locally')}{job.currentStep !== undefined && job.totalSteps ? ` · ${job.currentStep}/${job.totalSteps}` : ''}</small><div className="progress compact"><i style={{ width: `${job.progress}%` }} /></div></>}{job.error && <p className="job-error">{job.error}</p>}</div><div className="job-actions">{job.outputUrl && <a className="secondary-button" href={job.outputUrl} target="_blank" rel="noreferrer"><ExternalLink size={15} />Open</a>}{['running', 'queued'].includes(job.status) && <button className="danger-button" disabled={cancellingIds.has(job.id)} onClick={() => void onCancel(job)}>{cancellingIds.has(job.id) ? <LoaderCircle size={15} className="spin" /> : <CircleStop size={15} />}{cancellingIds.has(job.id) ? 'Stopping…' : 'Stop'}</button>}</div></article> })}</div>}</div>
+  return <div className="standard-page"><div className="page-heading"><div><p className="eyebrow">LOCAL WORKSPACE</p><h1>{title}</h1><p>{note}</p></div></div>{jobs.length === 0 ? <div className="empty-page"><History size={28} /><strong>{empty}</strong><span>New work is saved automatically on this device.</span></div> : <div className="job-list">{jobs.map((job) => { const audio = job.mediaType === 'audio'; const image = job.mediaType === 'image'; return <article className={`job-row ${['running', 'queued'].includes(job.status) ? 'constructing' : ''}`} key={job.id}><div className={`job-thumbnail ${audio ? 'audio' : ''}`}>{job.outputUrl ? audio ? <Music2 /> : image ? <img src={job.outputUrl} alt="Generated reference still" /> : <video src={job.outputUrl} muted /> : job.status === 'running' ? <LoaderCircle className="spin" /> : audio ? <Music2 /> : image ? <ImageIcon /> : <Film />}</div><div className="job-copy"><div><StatusBadge status={job.status} /><span>{new Date(job.createdAt).toLocaleString()}</span></div><strong>{shortPrompt(job.prompt)}</strong><small>{audio ? `ACE-Step · ${job.duration}s · audio` : `${job.width} × ${job.height} · ${image ? 'Ref2VA still' : `${job.duration}s · ${job.mode}`}`}</small><JobExecutionChips job={job} />{job.outputUrl && audio && <audio className="job-audio" src={job.outputUrl} controls preload="metadata" />}{['running', 'queued'].includes(job.status) && <><small className="job-progress-label">{job.progressLabel ?? (job.status === 'queued' ? 'Waiting in queue' : audio ? 'Generating music locally' : image ? 'Generating one reference still' : 'Rendering locally')}{job.queuePosition ? ` · position ${job.queuePosition}` : ''}{job.currentStep !== undefined && job.totalSteps ? ` · ${job.currentStep}/${job.totalSteps}` : ''}</small><div className="progress compact"><i style={{ width: `${job.progress}%` }} /></div></>}{job.error && <p className="job-error">{job.error}</p>}</div><div className="job-actions">{job.outputUrl && <a className="secondary-button" href={job.outputUrl} target="_blank" rel="noreferrer"><ExternalLink size={15} />Open</a>}{['running', 'queued'].includes(job.status) && <button className="danger-button" disabled={cancellingIds.has(job.id)} onClick={() => void onCancel(job)}>{cancellingIds.has(job.id) ? <LoaderCircle size={15} className="spin" /> : <CircleStop size={15} />}{cancellingIds.has(job.id) ? 'Stopping…' : 'Stop'}</button>}</div></article> })}</div>}</div>
 }
 
 function SettingsView({ settings, setSettings, info, models, h3Report, scanning, status, checking, diagnosticRunning, ollamaModels, onRefreshOllama, onScan, onCheck, onSave, onApplyDefaults, onRunDiagnostics }: { settings: AppSettings; setSettings(value: AppSettings): void; info: ObjectInfo; models: ModelFile[]; h3Report: ReturnType<typeof h3StackReport>; scanning: boolean; status: ComfyStatus; checking: boolean; diagnosticRunning: boolean; ollamaModels: OllamaModel[]; onRefreshOllama(): void; onScan(): void; onCheck(): void; onSave(): void; onApplyDefaults(): void; onRunDiagnostics(): void }) {
@@ -2382,11 +2458,14 @@ function SettingsView({ settings, setSettings, info, models, h3Report, scanning,
   const activeUrlField = settings.llmProvider === 'lmstudio' ? 'lmStudioUrl' : 'ollamaUrl'
   const updateDefaults = (patch: Partial<AppSettings['generationDefaults']>) => setSettings({ ...settings, generationDefaults: { ...defaults, ...patch } })
   const [presetName, setPresetName] = useState('')
+  const [workflowKind, setWorkflowKind] = useState<'h3-i2v' | 'ref2va' | 'ltx' | 'zimage' | 'acestep'>('h3-i2v')
+  const [workflowExportStatus, setWorkflowExportStatus] = useState('')
   const [activeSettingsSection, setActiveSettingsSection] = useState('display')
   const settingsSections = [
     ['display', 'Display & access'],
     ['engine', 'ComfyUI engine'],
     ['performance', 'Performance'],
+    ['workflows', 'Workflow export'],
     ['h3', 'H3 engine stack'],
     ['defaults', 'Render defaults'],
     ['assistant', 'Local AI'],
@@ -2426,15 +2505,51 @@ function SettingsView({ settings, setSettings, info, models, h3Report, scanning,
   const schedulerOptions = [...new Set([defaults.scheduler, 'simple', 'beta', 'normal', ...choices(info, 'BasicScheduler', 'scheduler')])]
   const warnedSampler = ['euler_ancestral', 'lcm', 'dpmpp_3m_sde'].includes(defaults.sampler)
   const attentionBackends = choices(info, 'ModelAttentionBackend', 'attention')
-  const kitchenAttention = resolveH3AttentionBackend('kitchen', attentionBackends)
-  const sageAttention = resolveH3AttentionBackend('sage', attentionBackends)
-  const nativeAttention = resolveH3AttentionBackend('native', attentionBackends)
-  const selectedAttention = resolveH3AttentionBackend(settings.attentionBackend, attentionBackends)
+  const kitchenAttention = resolveAttentionBackend('kitchen', attentionBackends)
+  const sageAttention = resolveAttentionBackend('sage', attentionBackends)
+  const nativeAttention = resolveAttentionBackend('native', attentionBackends)
+  const selectedAttention = resolveAttentionBackend(settings.attentionBackend, attentionBackends)
+  const exportWorkflow = async () => {
+    const [width, height] = defaults.resolution.split('x').map(Number)
+    const h3 = inferSelections(models, defaults.turbo, defaults.textEncoderPreference)
+    const ltx = inferLtx25Selections(models, choices(info, 'LatentUpscaleModelLoader', 'model_name'))
+    const ace = inferAceStepSelections(models)
+    const attentionBackend = selectedAttention
+    const filenamePrefix = `MiniMax_Export_${Date.now()}`
+    let workflow: Record<string, unknown>
+    let filename: string
+    if (workflowKind === 'ref2va') {
+      filename = 'minimax-ref2va-api-workflow.json'
+      workflow = buildMiniMaxWorkflow({ mode: 'reference', prompt: 'Describe the shot. Attach reference media in ComfyUI before queueing.', width, height, duration: defaults.duration, seed: 12345, steps: defaults.steps, turbo: defaults.turbo, sampler: defaults.sampler, scheduler: defaults.scheduler, experimentalSampling: defaults.experimentalSampling, refImageSize: defaults.refImageSize, loraStrength: defaults.loraStrength, attentionBackend, filenamePrefix, referenceImages: [], referenceVideos: [], referenceAudios: [] }, h3, { images: [], videos: [], audios: [] })
+    } else if (workflowKind === 'ltx') {
+      filename = 'ltx-2.5-api-workflow.json'
+      workflow = buildLtx25Workflow({ mode: 'text', prompt: 'Describe one continuous cinematic shot.', width, height, duration: defaults.duration, seed: 12345, preset: 'turbo', attentionBackend, filenamePrefix }, ltx)
+    } else if (workflowKind === 'zimage') {
+      filename = 'z-image-api-workflow.json'
+      const zModel = models.find((model) => model.kind === 'diffusion_models' && /z[_-]?image.*turbo/i.test(model.name))?.name ?? 'z_image_turbo_bf16.safetensors'
+      const zEncoder = models.find((model) => model.kind === 'text_encoders' && /qwen[_-]?3[_-]?4b/i.test(model.name))?.name ?? 'qwen_3_4b.safetensors'
+      const zVae = models.find((model) => model.kind === 'vae' && /^ae\.safetensors$/i.test(model.name))?.name ?? 'ae.safetensors'
+      workflow = buildZImage('Describe a single polished image.', width, height, 12345, zModel, zEncoder, zVae, 8, 1, 'turbo', '', attentionBackend)
+    } else if (workflowKind === 'acestep') {
+      filename = 'ace-step-1.5-api-workflow.json'
+      workflow = buildAceStepWorkflow({ model: ace.sft ? 'sft' : 'base', tags: 'cinematic instrumental soundtrack', lyrics: '', instrumental: true, duration: 60, bpm: 120, timeSignature: '4', language: 'en', keyScale: 'C major', seed: 12345, generateAudioCodes: true, attentionBackend, filenamePrefix }, ace)
+    } else {
+      filename = 'minimax-h3-i2v-api-workflow.json'
+      workflow = buildMiniMaxWorkflow({ mode: 'text', prompt: 'Describe one continuous cinematic shot.', width, height, duration: defaults.duration, seed: 12345, steps: defaults.steps, turbo: defaults.turbo, sampler: defaults.sampler, scheduler: defaults.scheduler, experimentalSampling: defaults.experimentalSampling, refImageSize: defaults.refImageSize, loraStrength: defaults.loraStrength, attentionBackend, filenamePrefix, referenceImages: [], referenceVideos: [], referenceAudios: [] }, h3, { images: [], videos: [], audios: [] })
+    }
+    try {
+      const saved = await window.minimax.exportWorkflowJson(filename, workflow)
+      setWorkflowExportStatus(saved ? `Saved ${filename}. It includes ${attentionBackend ? attentionBackendLabel(attentionBackend) : 'ComfyUI default attention'}.` : 'Workflow export cancelled.')
+    } catch (error) {
+      setWorkflowExportStatus(error instanceof Error ? `Could not export workflow: ${error.message}` : 'Could not export workflow.')
+    }
+  }
   return <div className="standard-page settings-page"><div className="page-heading"><div><p className="eyebrow">APPLICATION</p><h1>Settings</h1><p>Organize your local engine, models, workspace scale, and output tools.</p></div><button className="primary-button" onClick={onSave}><Save size={17} />Save settings</button></div>
     <div className="settings-layout"><aside className="settings-sidebar" aria-label="Settings sections"><span>SETTINGS</span>{settingsSections.map(([id, label]) => <button key={id} type="button" className={activeSettingsSection === id ? 'active' : ''} onClick={() => openSettingsSection(id)}>{label}</button>)}</aside><div className="settings-content">
     <section className="settings-section settings-display-section" id="settings-display"><div className="settings-heading"><div><SlidersHorizontal size={19} /><span><strong>Display & access</strong><small>Make the workspace comfortable at your screen resolution and text size.</small></span></div><output>{settings.uiScale}%</output></div><div className="ui-scale-control"><div><label htmlFor="ui-scale">Interface scale</label><small>Changes the entire application immediately. The choice is saved with your local settings.</small></div><div><input id="ui-scale" type="range" min="75" max="150" step="5" value={settings.uiScale} onChange={(event) => { const uiScale = Number(event.target.value); setSettings({ ...settings, uiScale }); void window.minimax.setUiScale(uiScale / 100) }} /><div><button type="button" className="secondary-button" onClick={() => { setSettings({ ...settings, uiScale: 100 }); void window.minimax.setUiScale(1) }}>Reset to 100%</button><strong>{settings.uiScale}%</strong></div></div></div></section>
     <section className="settings-section" id="settings-engine"><div className="settings-heading"><div><Activity size={19} /><span><strong>ComfyUI engine</strong><small>The desktop app communicates only with this local address.</small></span></div><span className={`health-pill ${status.connected ? 'online' : ''}`}>{status.connected ? 'Connected' : 'Offline'}</span></div><div className="connection-row"><div className="field-group grow"><label htmlFor="comfy-url">Server URL</label><input id="comfy-url" value={settings.comfyUrl} onChange={(event) => setSettings({ ...settings, comfyUrl: event.target.value })} /></div><button className="secondary-button test-button" onClick={onCheck} disabled={checking}>{checking ? <LoaderCircle size={16} className="spin" /> : <RefreshCw size={16} />}Test connection</button></div>{status.connected && status.stats?.devices?.[0] && <div className="device-strip"><Gauge size={17} /><span><strong>{status.stats.devices[0].name ?? 'Compute device'}</strong><small>{status.stats.devices[0].vram_total ? `${formatBytes(status.stats.devices[0].vram_total)} VRAM · ${formatBytes(status.stats.devices[0].vram_free ?? 0)} free` : 'ComfyUI device detected'}</small></span></div>}</section>
-    <section className="settings-section performance-settings" id="settings-performance"><div className="settings-heading"><div><Gauge size={19} /><span><strong>Render performance</strong><small>Global H3 attention acceleration. The selected backend is added to every new H3 and Ref2VA graph.</small></span></div><span className={`health-pill ${selectedAttention ? 'online' : ''}`}>{selectedAttention ? 'Ready' : 'Setup needed'}</span></div><fieldset className="attention-backend-picker"><legend>Attention backend</legend><label className={settings.attentionBackend === 'automatic' ? 'selected' : ''}><input type="radio" name="attention-backend" checked={settings.attentionBackend === 'automatic'} onChange={() => setSettings({ ...settings, attentionBackend: 'automatic' })} /><span><strong>Automatic</strong><small>{kitchenAttention ? `Uses ${kitchenAttention} when detected, then SageAttention, then native.` : sageAttention ? `Uses ${sageAttention} when detected, then native.` : 'Uses the native backend until an accelerated backend is detected.'}</small></span></label><label className={settings.attentionBackend === 'kitchen' ? 'selected' : ''}><input type="radio" name="attention-backend" checked={settings.attentionBackend === 'kitchen'} onChange={() => setSettings({ ...settings, attentionBackend: 'kitchen' })} /><span><strong>Kitchen INT8</strong><small>{kitchenAttention ? `Detected: ${kitchenAttention}` : 'Not detected — the graph will safely use native attention.'}</small></span></label><label className={settings.attentionBackend === 'sage' ? 'selected' : ''}><input type="radio" name="attention-backend" checked={settings.attentionBackend === 'sage'} onChange={() => setSettings({ ...settings, attentionBackend: 'sage' })} /><span><strong>SageAttention</strong><small>{sageAttention ? `Detected: ${sageAttention}` : 'Requires SageAttention to be enabled by the running ComfyUI environment.'}</small></span></label><label className={settings.attentionBackend === 'native' ? 'selected' : ''}><input type="radio" name="attention-backend" checked={settings.attentionBackend === 'native'} onChange={() => setSettings({ ...settings, attentionBackend: 'native' })} /><span><strong>Native</strong><small>{nativeAttention ? `Detected: ${nativeAttention}` : 'Use ComfyUI’s standard attention implementation.'}</small></span></label></fieldset><div className="settings-note"><strong>ComfyUI Desktop setup</strong><br />After installing <code>comfy-kitchen</code>, restart ComfyUI Desktop and click <em>Test connection</em>. When <code>ModelAttentionBackend</code> reports a Kitchen option, MiniMax Studio automatically inserts it directly after the H3 model and before Ref2VA conditioning/sampling. Kitchen and Sage are alternatives: select one, never both.</div>{!attentionBackends.length && <p className="settings-warning"><AlertCircle size={15} />This ComfyUI server does not report <code>ModelAttentionBackend</code> yet. Update/restart ComfyUI Desktop, then test the connection again. No acceleration graph is sent until it is detected.</p>}</section>
+    <section className="settings-section performance-settings" id="settings-performance"><div className="settings-heading"><div><Gauge size={19} /><span><strong>Render performance</strong><small>Global attention acceleration. The selected backend is applied to every compatible new H3, Ref2VA, LTX, and ACE-Step graph.</small></span></div><span className={`health-pill ${selectedAttention ? 'online' : ''}`}>{selectedAttention ? 'Ready' : 'Setup needed'}</span></div><fieldset className="attention-backend-picker"><legend>Attention backend</legend><label className={settings.attentionBackend === 'automatic' ? 'selected' : ''}><input type="radio" name="attention-backend" checked={settings.attentionBackend === 'automatic'} onChange={() => setSettings({ ...settings, attentionBackend: 'automatic' })} /><span><strong>Automatic</strong><small>{kitchenAttention ? `Uses ${kitchenAttention} when detected, then SageAttention, then native.` : sageAttention ? `Uses ${sageAttention} when detected, then native.` : 'Uses the native backend until an accelerated backend is detected.'}</small></span></label><label className={settings.attentionBackend === 'kitchen' ? 'selected' : ''}><input type="radio" name="attention-backend" checked={settings.attentionBackend === 'kitchen'} onChange={() => setSettings({ ...settings, attentionBackend: 'kitchen' })} /><span><strong>Kitchen INT8</strong><small>{kitchenAttention ? `Detected: ${kitchenAttention}` : 'Not detected — the graph will safely use native attention.'}</small></span></label><label className={settings.attentionBackend === 'sage' ? 'selected' : ''}><input type="radio" name="attention-backend" checked={settings.attentionBackend === 'sage'} onChange={() => setSettings({ ...settings, attentionBackend: 'sage' })} /><span><strong>SageAttention</strong><small>{sageAttention ? `Detected: ${sageAttention}` : 'Requires SageAttention to be enabled by the running ComfyUI environment.'}</small></span></label><label className={settings.attentionBackend === 'native' ? 'selected' : ''}><input type="radio" name="attention-backend" checked={settings.attentionBackend === 'native'} onChange={() => setSettings({ ...settings, attentionBackend: 'native' })} /><span><strong>Native</strong><small>{nativeAttention ? `Detected: ${nativeAttention}` : 'Use ComfyUI’s standard attention implementation.'}</small></span></label></fieldset><div className="settings-note"><strong>ComfyUI Desktop setup</strong><br />After installing <code>comfy-kitchen</code>, restart ComfyUI Desktop and click <em>Test connection</em>. When <code>ModelAttentionBackend</code> reports a Kitchen option, MiniMax Studio inserts it immediately after each compatible diffusion model and before its conditioning or sampling nodes. Kitchen and Sage are alternatives: select one, never both.</div>{!attentionBackends.length && <p className="settings-warning"><AlertCircle size={15} />This ComfyUI server does not report <code>ModelAttentionBackend</code> yet. Update/restart ComfyUI Desktop, then test the connection again. No acceleration graph is sent until it is detected.</p>}</section>
+    <section className="settings-section workflow-export-section" id="settings-workflows"><div className="settings-heading"><div><Save size={19} /><span><strong>ComfyUI workflow export</strong><small>Save an API-format workflow for queueing directly in ComfyUI. It uses your indexed model filenames and selected attention backend.</small></span></div></div><div className="workflow-export-controls"><label>Workflow template<select value={workflowKind} onChange={(event) => setWorkflowKind(event.target.value as typeof workflowKind)}><option value="h3-i2v">MiniMax H3 image / text to video</option><option value="ref2va">MiniMax H3 Ref2VA</option><option value="ltx">LTX 2.5 video</option><option value="zimage">Z-Image still</option><option value="acestep">ACE-Step 1.5 audio</option></select></label><button type="button" className="secondary-button" onClick={() => void exportWorkflow()}><Save size={15} />Export workflow JSON</button></div><p className="field-help">Exports ComfyUI’s API prompt JSON, not a screenshot or app preset. Reference-media templates include a clear placeholder prompt; attach your own input/reference nodes in ComfyUI before queueing. {selectedAttention ? `${attentionBackendLabel(selectedAttention)} will be included as a ModelAttentionBackend node.` : 'No acceleration node is added until ComfyUI reports a compatible backend.'}</p>{workflowExportStatus && <p className="settings-note workflow-export-status" role="status">{workflowExportStatus}</p>}</section>
     <section className="settings-section h3-stack-section" id="settings-h3">
       <div className="settings-heading"><div><Gauge size={19} /><span><strong>H3 engine stack</strong><small>Compares the selected files with the validated official ComfyUI stack.</small></span></div><span className={`health-pill ${h3Report.validated ? 'online' : ''}`}>{h3Report.validated ? 'Validated' : h3Report.ready ? 'Custom' : 'Incomplete'}</span></div>
       <div className="h3-stack-list">{h3Report.rows.map((row) => <div key={row.label} className={row.validated ? 'validated' : row.optional && !row.selected ? 'optional' : 'custom'}><span>{row.validated ? <Check size={14} /> : row.optional && !row.selected ? <Minus size={14} /> : <AlertCircle size={14} />}</span><div><strong>{row.label}</strong><small title={row.selected || row.expected}>{row.selected || `${row.optional ? 'Optional' : 'Missing'} · expected ${row.expected}`}</small></div><em>{row.validated ? 'Recommended' : row.selected ? 'Non-standard' : row.optional ? 'Optional' : 'Missing'}</em></div>)}</div>
@@ -2460,7 +2575,7 @@ function SettingsView({ settings, setSettings, info, models, h3Report, scanning,
         <SelectField label="Default post-render upscale" value={defaults.upscaleMode} onChange={(upscaleMode) => updateDefaults({ upscaleMode: upscaleMode as UpscaleMode })} options={[["off", 'Off · recommended for diagnosis'], ["ltx", 'LTX 2.5 latent · 2×'], ["rtx", 'RTX/CUDA frames · 2× · experimental']]} />
         <label className="settings-check"><input type="checkbox" checked={defaults.livePreview} onChange={(event) => updateDefaults({ livePreview: event.target.checked })} /><span><strong>Live preview by default</strong><small>Uses ComfyUI progress and preview events.</small></span></label>
       </div>
-      <details className="experimental-settings"><summary><AlertCircle size={15} /><span><strong>Experimental sampling</strong><small>Custom samplers, shifts, LoRA strength, and 4-step FL2V can make output less stable.</small></span><ChevronDown size={15} /></summary><div className="generation-defaults-grid"><label className="settings-check"><input type="checkbox" checked={defaults.experimentalSampling} onChange={(event) => updateDefaults({ experimentalSampling: event.target.checked })} /><span><strong>Enable custom sampler</strong><small>Otherwise res_multistep + simple is forced.</small></span></label><SelectField label="Experimental Turbo override" value={defaults.turbo} onChange={(turbo) => updateDefaults({ turbo: turbo as 'off' | '4' | '8' })} options={[["off", 'Off'], ["8", 'Official 8-step'], ["4", '4-step preview testing']]} /><NumberField label="Turbo LoRA strength" value={defaults.loraStrength} min={0} max={2} step={0.05} onChange={(loraStrength) => updateDefaults({ loraStrength })} /><SelectField label="Sampler" value={defaults.experimentalSampling ? defaults.sampler : 'res_multistep'} disabled={!defaults.experimentalSampling} onChange={(sampler) => updateDefaults({ sampler })} options={samplerOptions.map((value) => [value, value])} /><SelectField label="Scheduler" value={defaults.experimentalSampling ? defaults.scheduler : 'simple'} disabled={!defaults.experimentalSampling} onChange={(scheduler) => updateDefaults({ scheduler })} options={schedulerOptions.map((value) => [value, value])} /><SelectField label="Sigma shifts" value={defaults.sigmaShiftMode} onChange={(sigmaShiftMode) => updateDefaults({ sigmaShiftMode: sigmaShiftMode as 'model' | 'custom' })} options={[["model", 'Native model defaults · 12 / 3'], ["custom", 'Custom MiniMaxH3SigmaShift node']]} /><NumberField label="Video sigma shift" value={defaults.shiftVideo} min={0.01} max={100} step={0.01} disabled={defaults.sigmaShiftMode !== 'custom'} onChange={(shiftVideo) => updateDefaults({ shiftVideo })} /><NumberField label="Audio sigma shift" value={defaults.shiftAudio} min={0.01} max={100} step={0.01} disabled={defaults.sigmaShiftMode !== 'custom'} onChange={(shiftAudio) => updateDefaults({ shiftAudio })} /></div></details>
+      <details className="experimental-settings"><summary><AlertCircle size={15} /><span><strong>Experimental sampling</strong><small>Custom samplers, shifts, official Turbo LoRA weight, and 4-step FL2V can make output less stable.</small></span><ChevronDown size={15} /></summary><div className="generation-defaults-grid"><label className="settings-check"><input type="checkbox" checked={defaults.experimentalSampling} onChange={(event) => updateDefaults({ experimentalSampling: event.target.checked })} /><span><strong>Enable custom sampler</strong><small>Otherwise res_multistep + simple is forced.</small></span></label><SelectField label="Experimental Turbo override" value={defaults.turbo} onChange={(turbo) => updateDefaults({ turbo: turbo as 'off' | '4' | '8' })} options={[["off", 'Off'], ["8", 'Official 8-step'], ["4", '4-step preview testing']]} /><div className="turbo-lora-weight"><NumberField label="Official Turbo LoRA weight" value={defaults.loraStrength} min={0} max={2} step={0.05} onChange={(loraStrength) => updateDefaults({ loraStrength })} /><small>Sets the automatic Turbo adapter weight; manual Additional ComfyUI LoRAs use their own strengths.</small></div><SelectField label="Sampler" value={defaults.experimentalSampling ? defaults.sampler : 'res_multistep'} disabled={!defaults.experimentalSampling} onChange={(sampler) => updateDefaults({ sampler })} options={samplerOptions.map((value) => [value, value])} /><SelectField label="Scheduler" value={defaults.experimentalSampling ? defaults.scheduler : 'simple'} disabled={!defaults.experimentalSampling} onChange={(scheduler) => updateDefaults({ scheduler })} options={schedulerOptions.map((value) => [value, value])} /><SelectField label="Sigma shifts" value={defaults.sigmaShiftMode} onChange={(sigmaShiftMode) => updateDefaults({ sigmaShiftMode: sigmaShiftMode as 'model' | 'custom' })} options={[["model", 'Native model defaults · 12 / 3'], ["custom", 'Custom MiniMaxH3SigmaShift node']]} /><NumberField label="Video sigma shift" value={defaults.shiftVideo} min={0.01} max={100} step={0.01} disabled={defaults.sigmaShiftMode !== 'custom'} onChange={(shiftVideo) => updateDefaults({ shiftVideo })} /><NumberField label="Audio sigma shift" value={defaults.shiftAudio} min={0.01} max={100} step={0.01} disabled={defaults.sigmaShiftMode !== 'custom'} onChange={(shiftAudio) => updateDefaults({ shiftAudio })} /></div></details>
       {warnedSampler && <p className="settings-warning"><AlertCircle size={15} />This sampler is on the compatibility-risk list you supplied. Test a short clip before committing to a final render.</p>}
       <p className="settings-note">The production path is 1344 × 768, 30 steps, res_multistep + simple, CFG 1, denoise 1, 24 fps, native 12/3 shifts, and upscale off. Custom sampling is intentionally separated because it complicates quality diagnosis.</p>
     </section>

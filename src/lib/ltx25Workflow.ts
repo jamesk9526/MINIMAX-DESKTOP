@@ -47,6 +47,12 @@ export function buildLtx25Workflow(
   // leaves the optional latent-upscale-model socket empty; retaining that
   // wiring avoids a current DynamicVRAM ModelPatcher compatibility failure.
   let modelLink: Link = ['1', 0]
+  // Native ComfyUI patch; this is inserted ahead of MSR, preview overrides,
+  // and both LTX guiders so every LTX sampling stage uses the selected backend.
+  if (options.attentionBackend) {
+    prompt['85'] = { class_type: 'ModelAttentionBackend', inputs: { model: modelLink, attention: options.attentionBackend } }
+    modelLink = ['85', 0]
+  }
   let initialVideo: Link = ['8', 0]
   if (options.msr && msrReferences.length) {
     // Licon MSR's loader must precede both LTX guiders; its guide then replaces

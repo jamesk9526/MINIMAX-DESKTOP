@@ -194,6 +194,7 @@ export type Ltx25GenerationOptions = {
   seed: number
   preset: 'quality' | 'turbo'
   previewOverride?: { nodeType: string; fps: number }
+  attentionBackend?: string
   msr?: { loraName: string; references: string[] }
   filenamePrefix: string
 }
@@ -218,6 +219,7 @@ export type AceStepGenerationOptions = {
   keyScale: string
   seed: number
   generateAudioCodes: boolean
+  attentionBackend?: string
   filenamePrefix: string
 }
 
@@ -285,6 +287,19 @@ export type GpuTelemetry = {
 
 export type JobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
 
+export type JobExecutionInfo = {
+  diffusionModel?: string
+  diffusionPrecision?: string
+  textEncoder?: string
+  attentionBackend?: string
+  sampler?: string
+  scheduler?: string
+  preview?: string
+  upscale?: string
+  referenceCount?: number
+  adapters?: string[]
+}
+
 export type GenerationJob = {
   id: string
   promptId?: string
@@ -298,6 +313,9 @@ export type GenerationJob = {
   totalSteps?: number
   lastSamplerStepAt?: number
   estimatedSamplerStepMs?: number
+  queueMissingAt?: number
+  queuePosition?: number
+  execution?: JobExecutionInfo
   outputUrl?: string
   localOutputPath?: string
   seed?: number
@@ -338,6 +356,7 @@ export type DesktopApi = {
   getSettings(): Promise<AppSettings>
   getGpuTelemetry(): Promise<GpuTelemetry>
   saveSettings(settings: AppSettings): Promise<AppSettings>
+  exportWorkflowJson(suggestedName: string, workflow: unknown): Promise<string | null>
   setUiScale(scale: number): Promise<number>
   chooseDirectory(initialPath?: string): Promise<string | null>
   chooseMedia(type: MediaKind): Promise<{ path: string; name: string } | null>
