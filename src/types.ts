@@ -45,6 +45,7 @@ export type AppSettings = {
   ffmpegPath: string
   uiScale: number
   experimentalLtxMsrEnabled: boolean
+  queueDelaySeconds: number
   characterDetailReferencesEnabled: boolean
   renderSettingsPresets: RenderSettingsPreset[]
   generationDefaults: GenerationDefaults

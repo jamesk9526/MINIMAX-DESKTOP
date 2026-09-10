@@ -21,6 +21,7 @@ const settings: AppSettings = {
   ffmpegPath: 'C:\\FFMPEG\\bin\\ffmpeg.exe',
   uiScale: 100,
   experimentalLtxMsrEnabled: false,
+  queueDelaySeconds: 0,
   characterDetailReferencesEnabled: false,
   renderSettingsPresets: [],
   generationDefaults: {

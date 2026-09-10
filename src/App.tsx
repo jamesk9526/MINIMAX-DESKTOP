@@ -600,6 +600,12 @@ function App() {
   const pendingKey = pendingJobs.map((job) => job.id).join(',')
   const jobsRef = useRef(jobs)
   jobsRef.current = jobs
+  const selectActiveJob = useCallback((nextJobId: string) => {
+    setActiveJobId((currentId) => {
+      const current = currentId ? jobsRef.current.find((job) => job.id === currentId) : undefined
+      return current && ['queued', 'running'].includes(current.status) ? currentId : nextJobId
+    })
+  }, [])
 
   const scanModels = useCallback(async (nextSettings: AppSettings) => {
     setScanning(true)
@@ -1246,7 +1252,7 @@ function App() {
     const localId = createId()
     const job: GenerationJob = { id: localId, provider: 'ltx25', mode: options.mode, prompt: options.prompt, createdAt: Date.now(), status: 'queued', progress: 2, progressLabel: input ? 'Preparing first frame' : 'Preparing workflow', width: options.width, height: options.height, duration: options.duration, characterProjectId: handoff?.characterProjectId ?? characterHandoff ?? undefined, locationProjectId: handoff?.locationProjectId }
     setJobs((current) => [job, ...current])
-    setActiveJobId(localId)
+    selectActiveJob(localId)
     setLtxSubmitting(true)
     setNotice({ tone: 'neutral', text: 'Preparing the official LTX‑2.5 ComfyUI graph…' })
     try {
@@ -1421,7 +1427,7 @@ function App() {
       characterProjectId: characterHandoff ?? undefined,
     }
     setJobs((current) => [job, ...current])
-    setActiveJobId(localId)
+    selectActiveJob(localId)
     try {
       const upload = async (file: MediaFile, fitToOutput = false) => file.kind === 'image' && (fitToOutput || Boolean(file.crop))
         ? window.minimax.uploadImageData(settings.comfyUrl, await prepareImage(file, width, height))
