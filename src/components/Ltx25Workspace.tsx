@@ -5,6 +5,7 @@ import { RenderConstruction } from './RenderConstruction'
 import type { AppSettings, GenerationJob, Ltx25GenerationOptions, Ltx25ModelSelection, MediaFile } from '../types'
 import { ltx25FrameCount } from '../lib/ltx25Workflow'
 import { applyDialoguePolicy } from '../lib/dialogPolicy'
+import { resolveLlmConnection } from '../lib/llmProvider'
 
 type WorkspaceState = {
   mode: 'text' | 'image'
@@ -59,6 +60,7 @@ export function Ltx25Workspace({ settings, models, pipelineReady, missingNodes, 
 }) {
   const initial = useMemo(readWorkspace, [])
   const [state, setState] = useState(initial)
+  const llm = resolveLlmConnection(settings)
   const [refining, setRefining] = useState(false)
   const [suggestion, setSuggestion] = useState('')
   const set = <K extends keyof WorkspaceState>(key: K, value: WorkspaceState[K]) => setState((current) => ({ ...current, [key]: value }))
@@ -78,11 +80,11 @@ export function Ltx25Workspace({ settings, models, pipelineReady, missingNodes, 
   }, [state.firstFrame])
 
   const refine = async () => {
-    if (!state.prompt.trim() || !settings.ollamaModel) return
+    if (!state.prompt.trim() || !llm.model) return
     setRefining(true); setSuggestion('')
     try {
       const audioDirection = state.noDialogue ? 'Specify only ambient sound; do not add dialogue, narration, singing, lip-sync, subtitles, captions, or text overlays.' : 'Specify synchronized dialogue or sound when useful.'
-      const result = await window.minimax.generateWithOllama(settings.ollamaUrl, settings.ollamaModel, `Rewrite this as one production-ready LTX-2.5 ${state.mode === 'image' ? 'image-to-video motion' : 'text-to-video'} prompt. Preserve intent. Specify subject action, camera, lighting, physical motion, pacing, and audio. ${audioDirection} Return only the prompt.\n\nDRAFT:\n${state.prompt.trim()}`)
+      const result = await window.minimax.generateWithOllama(llm.url, llm.model, `Rewrite this as one production-ready LTX-2.5 ${state.mode === 'image' ? 'image-to-video motion' : 'text-to-video'} prompt. Preserve intent. Specify subject action, camera, lighting, physical motion, pacing, and audio. ${audioDirection} Return only the prompt.\n\nDRAFT:\n${state.prompt.trim()}`, llm.provider)
       setSuggestion(result)
     } finally { setRefining(false) }
   }
@@ -103,7 +105,7 @@ export function Ltx25Workspace({ settings, models, pipelineReady, missingNodes, 
           <div className="field-label"><label htmlFor="ltx-prompt">Prompt</label><span>{state.prompt.length.toLocaleString()} characters</span></div>
           <textarea id="ltx-prompt" value={state.prompt} onChange={(event) => set('prompt', event.target.value)} placeholder={state.mode === 'image' ? 'Describe how the first frame moves, camera direction, dialogue, and sound…' : 'Describe the scene, action, camera, lighting, dialogue, and sound…'} />
           <label className="no-dialogue-toggle" title="Adds a render instruction that blocks spoken words, narration, singing, lip-sync, captions, and text overlays."><input type="checkbox" checked={state.noDialogue} onChange={(event) => set('noDialogue', event.target.checked)} /><span><strong>No dialogue</strong><small>{state.noDialogue ? 'Ambient sound only' : 'Dialogue and lip-sync allowed'}</small></span></label>
-          <div className="prompt-tools"><div className="prompt-tool-buttons"><button type="button" onClick={() => void refine()} disabled={!ollamaAvailable || refining || !state.prompt.trim()}>{refining ? <LoaderCircle size={14} className="spin" /> : <Sparkles size={14} />}Refine for LTX</button></div><span className={`local-model-chip ${ollamaAvailable ? 'online' : ''}`}><span />{ollamaAvailable ? settings.ollamaModel : 'Ollama offline'}</span></div>
+          <div className="prompt-tools"><div className="prompt-tool-buttons"><button type="button" onClick={() => void refine()} disabled={!ollamaAvailable || refining || !state.prompt.trim()}>{refining ? <LoaderCircle size={14} className="spin" /> : <Sparkles size={14} />}Refine for LTX</button></div><span className={`local-model-chip ${ollamaAvailable ? 'online' : ''}`}><span />{ollamaAvailable ? llm.model : `${llm.label} offline`}</span></div>
           {suggestion && <div className="assistant-result"><div className="assistant-result-heading"><span><Sparkles size={14} />Local suggestion</span><small>Review before applying</small></div><textarea aria-label="LTX prompt suggestion" value={suggestion} readOnly /><div className="assistant-actions"><button className="secondary-button" onClick={() => setSuggestion('')}>Dismiss</button><button className="primary-button" onClick={() => { set('prompt', suggestion); setSuggestion('') }}><Check size={14} />Use suggestion</button></div></div>}
         </div>
         {state.mode === 'image' && <div className="ltx-image-input"><div className={`media-drop ${state.firstFrame ? 'has-file' : ''}`}>{state.firstFrame?.preview && <img src={state.firstFrame.preview} alt="Selected LTX first frame" />}<div className="media-drop-content"><span className="upload-icon"><ImageIcon size={19} /></span><strong>{state.firstFrame?.name ?? 'First frame'}</strong><small>{state.firstFrame ? 'Ready for LTX I2V' : 'PNG, JPG, or WebP'}</small><button onClick={async () => { const file = await onChooseImage(); if (file) set('firstFrame', file) }}>{state.firstFrame ? 'Replace' : 'Choose image'}</button></div>{state.firstFrame && <button className="remove-media" onClick={() => set('firstFrame', null)} aria-label="Remove first frame">×</button>}</div>{state.firstFrame && <ImageCrop label="LTX first frame" file={state.firstFrame} resolution={state.resolution} onChange={(file) => set('firstFrame', file)} />}</div>}

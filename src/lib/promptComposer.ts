@@ -83,6 +83,10 @@ export function resolveMovieShotReferences(project: MovieProject, scene: MovieSc
 
 export function resolveMovieShotGenerationMode(shot: MovieShot, references: MovieReferenceBinding[]) {
   const preferredMode = shot.preferredMode ?? shot.mode
+  // A continuation is an image-to-video handoff by definition. Reference-to-
+  // video can guide the first moment, but cannot hard-pin it to the preceding
+  // render's final pixel frame, so it is not acceptable for a seamless cut.
+  if (references.some((item) => item.purpose === 'continuity')) return { preferredMode, effectiveMode: 'image' as GenerationMode }
   const hasReferenceMedia = references.some((item) => item.purpose !== 'continuity') || Boolean(shot.referenceVideos?.length || shot.referenceAudios?.length)
   const continuationOnly = references.some((item) => item.purpose === 'continuity') && !hasReferenceMedia
   return { preferredMode, effectiveMode: (hasReferenceMedia || preferredMode === 'reference' ? 'reference' : continuationOnly ? 'image' : preferredMode) as GenerationMode }
@@ -150,23 +154,27 @@ export function compileMovieShotPrompt(project: MovieProject, scene: MovieScene,
 }
 
 export function buildPromptAssistantRequest(tool: PromptAssistantTool, draft: string, context: { duration: number; mode: GenerationMode; referenceMap?: string[]; noDialogue?: boolean }) {
-  const preservation = 'Preserve named characters, exact quoted dialogue, specified camera and lens choices, timing, negative constraints, continuity instructions, and every existing <Picture N>, <Video N>, and <Audio N> assignment. Never rename characters, invent replacement wardrobe, remove reference tags, add unnecessary cuts, or turn one continuous shot into a montage.'
-  const order = 'Write natural production language in this order when relevant: subject/identity, starting state, environment, literal chronological action, shot size, camera angle, lens/depth of field, camera movement, lighting, visual treatment, continuity, dialogue, ambient sound/effects, and reference assignments.'
+  const preservation = 'Preserve named characters, exact quoted dialogue, specified camera and lens choices, timing, negative constraints, continuity instructions, and every existing <Picture N>, <Video N>, and <Audio N> assignment. Treat the supplied reference map as authoritative: describe what each source contributes and never swap, merge, renumber, or vaguely refer to sources. Never rename characters, invent replacement wardrobe, remove reference tags, add unnecessary cuts, or turn one continuous shot into a montage.'
+  const order = 'Write concrete MiniMax-ready production language in this order when relevant: subject/identity and reference assignment, starting state, environment, literal chronological action, shot size, camera angle, lens/depth of field, camera movement, lighting, visual treatment, continuity, dialogue, ambient sound/effects, and exclusions. Prefer observable actions over abstract mood words.'
   const task = tool === 'enhance'
     ? `Rewrite the draft as one polished MiniMax H3 ${context.mode === 'reference' ? 'reference-to-video' : context.mode === 'image' ? 'image-to-video' : context.mode === 'frames' ? 'first/last-frame' : 'text-to-video'} prompt. ${order}`
     : tool === 'timeline'
-      ? `Rewrite the draft as a readable chronological action plan lasting exactly ${context.duration} seconds. Use 0–2s style beats. For clips of 6 seconds or less, use only two or three meaningful beats and keep it one continuous shot. ${order}`
+      ? `Rewrite the draft as one continuous MiniMax H3 shot lasting exactly ${context.duration} seconds. Start each beat with a non-overlapping time range such as 0.0–2.0s; cover the entire duration with no gaps, overlaps, or time beyond ${context.duration}s. Use ${context.duration <= 6 ? '2–3' : context.duration <= 10 ? '3–5' : '4–6'} meaningful beats. Every beat must state the subject action, camera behavior, and continuity from the prior beat. Keep motion physically achievable, preserve screen direction and identity, avoid cuts or montages, and reserve enough time for the final action to settle. ${order}`
       : `Preserve the visual direction and strengthen synchronized dialogue/vocal intent, ambience, sound effects, spatial placement, timing, and clean transitions. State no music when a score is not requested. ${order}`
-  return [task, preservation, context.noDialogue ? 'Audio constraint: no spoken dialogue, narration, voice-over, singing, lip-sync, subtitles, captions, or text overlays. Preserve ambient sound effects only.' : '', `Effective duration: ${context.duration} seconds`, `Effective generation route: ${context.mode}`, context.referenceMap?.length ? `Reference map: ${context.referenceMap.join('; ')}` : '', 'Return only the finished prompt, with no analysis, preface, Markdown fence, or alternatives.', `DRAFT:\n${draft.trim()}`].filter(Boolean).join('\n\n')
+  return [task, preservation, context.noDialogue ? 'Audio constraint: no spoken dialogue, narration, voice-over, singing, lip-sync, subtitles, captions, or text overlays. Preserve ambient sound effects only.' : '', `Effective duration: ${context.duration} seconds`, `Effective generation route: ${context.mode}`, context.referenceMap?.length ? `REFERENCE MAP (authoritative):\n${context.referenceMap.join('\n')}` : '', 'Return only the finished prompt, with no analysis, preface, Markdown fence, or alternatives.', `DRAFT:\n${draft.trim()}`].filter(Boolean).join('\n\n')
 }
 
 export function resolveMovieShot(project: MovieProject, scene: MovieScene, shot: MovieShot, library: CharacterProject[], continuityFrame?: MediaFile): ResolvedMovieShot {
   const all = resolveMovieShotReferences(project, scene, shot, library, continuityFrame)
-  const references = all.slice(0, 9)
+  const continuationOnly = all.some((item) => item.purpose === 'continuity')
+  // The source frame is loaded as I2V's actual first_frame, not as a numbered
+  // Ref2V asset. Exclude the other references here so no <Picture N> text can
+  // be emitted without a matching uploaded input.
+  const references = continuationOnly ? all.filter((item) => item.purpose === 'continuity') : all.slice(0, 9)
   const route = resolveMovieShotGenerationMode(shot, references)
   const characterNames = [...new Set(references.filter((item) => item.characterId && (item.purpose === 'character' || item.purpose === 'character-angle')).map((item) => item.label.replace(/^Character:\s*/, '').split(' / ')[0]))]
-  const routeReason = route.effectiveMode === 'reference' && characterNames.length ? `Reference mode selected automatically because ${characterNames.join(' and ')} ${characterNames.length === 1 ? 'has' : 'have'} approved references.` : route.effectiveMode === 'reference' ? 'Reference mode selected because this shot has reusable reference media.' : `Using the preferred ${route.effectiveMode} route.`
-  const compiledBindings = route.effectiveMode === 'reference' ? references : references.filter((item) => item.purpose !== 'continuity')
+  const routeReason = continuationOnly ? 'Exact continuation selected: the prior shot’s final frame is hard-pinned as this shot’s I2V opening frame.' : route.effectiveMode === 'reference' && characterNames.length ? `Reference mode selected automatically because ${characterNames.join(' and ')} ${characterNames.length === 1 ? 'has' : 'have'} approved references.` : route.effectiveMode === 'reference' ? 'Reference mode selected because this shot has reusable reference media.' : `Using the preferred ${route.effectiveMode} route.`
+  const compiledBindings = continuationOnly ? [] : route.effectiveMode === 'reference' ? references : references.filter((item) => item.purpose !== 'continuity')
   const continuationDirection = route.effectiveMode === 'image' && references.some((item) => item.purpose === 'continuity') ? ' Continue directly from the supplied first frame, preserving its framing, lighting, pose, screen direction, and motion state.' : ''
-  return { ...route, references, omittedReferences: all.slice(9), compiledPrompt: `${compileMovieShotPrompt(project, scene, shot, compiledBindings)}${continuationDirection}`, routeReason }
+  return { ...route, references, omittedReferences: continuationOnly ? [] : all.slice(9), compiledPrompt: `${compileMovieShotPrompt(project, scene, shot, compiledBindings)}${continuationDirection}`, routeReason }
 }

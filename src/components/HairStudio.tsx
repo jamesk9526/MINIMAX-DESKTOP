@@ -5,6 +5,7 @@ import { choices, type ObjectInfo } from '../lib/comfyInfo'
 import { buildZImage } from '../lib/zimage'
 import type { AppSettings, HairStyleProject, MediaFile } from '../types'
 import { ReferenceApprovalModal } from './ReferenceApprovalModal'
+import { resolveLlmConnection } from '../lib/llmProvider'
 
 function cleanPrompt(value: string) {
   return value.replace(/\\\s*(?:\r?\n|$)/g, ' ').replace(/[*_#`]+/g, '').replace(/\s+/g, ' ').trim()
@@ -21,6 +22,7 @@ export function HairStudio({ settings, info, connected, ollamaAvailable, onNotic
   const [error, setError] = useState(false)
   const [candidate, setCandidate] = useState<{ hairStyleId: string; file: MediaFile } | null>(null)
   const active = projects.find((item) => item.id === activeId) ?? projects[0]
+  const llm = resolveLlmConnection(settings)
   const commit = (next: HairStyleProject[]) => { setProjects(next); saveHairStyleProjects(next) }
   const patch = (change: Partial<HairStyleProject>) => commit(projects.map((item) => item.id === active.id ? { ...item, ...change, updatedAt: Date.now() } : item))
   const patchById = (id: string, change: Partial<HairStyleProject>) => setProjects((current) => { const next = current.map((item) => item.id === id ? { ...item, ...change, updatedAt: Date.now() } : item); saveHairStyleProjects(next); return next })
@@ -43,8 +45,8 @@ export function HairStudio({ settings, info, connected, ollamaAvailable, onNotic
     if (!ollamaAvailable || assisting) return
     setAssisting(true)
     try {
-      const result = await window.minimax.generateWithOllama(settings.ollamaUrl, settings.ollamaModel, `Rewrite these notes as one precise hairstyle reference prompt. Preserve exact texture, curl or braid pattern, silhouette, length, layers, part, fringe, hairline, edges, color, tonal variation, volume, and finish. Describe hair only; never invent a face, person, outfit, jewelry, headwear, or accessory. End with: the same hairstyle shown from front, side, and back on a neutral featureless salon mannequin head, upper-shoulder crop, mid-gray background, even studio lighting, sharp individual strands, no text or labels. Return one plain-text paragraph only.\n\nName: ${active.name}\nDesign: ${active.description}\nTexture: ${active.texture}\nLength: ${active.length}\nColor: ${active.color}\nHairline and part: ${active.hairline}\nFinish: ${active.finish}`)
-      patch({ referencePrompt: cleanPrompt(result) }); onNotice('success', 'Hair design prompt refined locally with Ollama.')
+      const result = await window.minimax.generateWithOllama(llm.url, llm.model, `Rewrite these notes as one precise hairstyle reference prompt. Preserve exact texture, curl or braid pattern, silhouette, length, layers, part, fringe, hairline, edges, color, tonal variation, volume, and finish. Describe hair only; never invent a face, person, outfit, jewelry, headwear, or accessory. End with: the same hairstyle shown from front, side, and back on a neutral featureless salon mannequin head, upper-shoulder crop, mid-gray background, even studio lighting, sharp individual strands, no text or labels. Return one plain-text paragraph only.\n\nName: ${active.name}\nDesign: ${active.description}\nTexture: ${active.texture}\nLength: ${active.length}\nColor: ${active.color}\nHairline and part: ${active.hairline}\nFinish: ${active.finish}`, llm.provider)
+      patch({ referencePrompt: cleanPrompt(result) }); onNotice('success', `Hair design prompt refined locally with ${llm.label}.`)
     } catch (cause) { onNotice('error', cause instanceof Error ? cause.message : String(cause)) }
     finally { setAssisting(false) }
   }

@@ -46,12 +46,13 @@ const preferredModel = (models: string[], variant: ZImageVariant) => models.find
   ?? (variant === 'turbo' ? 'z_image_turbo_bf16.safetensors' : 'z_image_bf16.safetensors')
 
 export function ZImageWorkspace({
-  url, info, connected, ollamaAvailable, ollamaUrl, ollamaModel, outputDirectory, onUse,
+  url, info, connected, ollamaAvailable, llmProvider, ollamaUrl, ollamaModel, outputDirectory, onUse,
 }: {
   url: string
   info: ObjectInfo
   connected: boolean
   ollamaAvailable: boolean
+  llmProvider: 'ollama' | 'lmstudio'
   ollamaUrl: string
   ollamaModel: string
   outputDirectory: string
@@ -167,7 +168,7 @@ export function ZImageWorkspace({
     setAssisting(true); setError(false); setMessage('Asking the local prompt assistant…')
     try {
       const instruction = `Rewrite this as one polished still-image prompt for ${variant === 'turbo' ? 'Z-Image Turbo' : 'the original Z-Image base model'}. Preserve the subject and intent while improving composition, lens, lighting, environment, texture, color, and clarity. Do not describe motion, sound, timelines, or multiple shots. Return only the finished prompt.\n\nDRAFT:\n${prompt.trim()}`
-      setPrompt(await window.minimax.generateWithOllama(ollamaUrl, ollamaModel, instruction))
+      setPrompt(await window.minimax.generateWithOllama(ollamaUrl, ollamaModel, instruction, llmProvider))
       setMessage('Prompt enhanced locally. Review it before generating.')
     } catch (caught) { setMessage(caught instanceof Error ? caught.message : String(caught)); setError(true) }
     finally { setAssisting(false) }
@@ -189,7 +190,7 @@ export function ZImageWorkspace({
         <div className="field-group">
           <div className="field-label"><label htmlFor="zimage-prompt">Image prompt</label><span>{prompt.length.toLocaleString()} characters</span></div>
           <textarea id="zimage-prompt" value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="Describe the subject, environment, composition, lens, lighting, color, and opening-frame details…" disabled={busy} />
-          <div className="zimage-prompt-actions"><button className="secondary-button" onClick={() => void enhance()} disabled={busy || assisting || !ollamaAvailable || !prompt.trim()} title={ollamaAvailable ? `Enhance with ${ollamaModel}` : 'Configure Ollama in Settings'}>{assisting ? <LoaderCircle size={15} className="spin" /> : <WandSparkles size={15} />}Enhance with Ollama</button><small>{ollamaAvailable ? `${ollamaModel} · local` : 'Ollama unavailable'}</small></div>
+          <div className="zimage-prompt-actions"><button className="secondary-button" onClick={() => void enhance()} disabled={busy || assisting || !ollamaAvailable || !prompt.trim()} title={ollamaAvailable ? `Enhance with ${ollamaModel}` : `Configure ${llmProvider === 'lmstudio' ? 'LM Studio' : 'Ollama'} in Settings`}>{assisting ? <LoaderCircle size={15} className="spin" /> : <WandSparkles size={15} />}Enhance with {llmProvider === 'lmstudio' ? 'LM Studio' : 'Ollama'}</button><small>{ollamaAvailable ? `${ollamaModel} · local` : `${llmProvider === 'lmstudio' ? 'LM Studio' : 'Ollama'} unavailable`}</small></div>
         </div>
 
         {variant === 'base' && <div className="field-group zimage-negative-prompt"><div className="field-label"><label htmlFor="zimage-negative-prompt">Negative prompt <small>Optional</small></label><span>{negativePrompt.length.toLocaleString()} characters</span></div><textarea id="zimage-negative-prompt" value={negativePrompt} onChange={(event) => setNegativePrompt(event.target.value)} placeholder="Describe artifacts or unwanted elements to suppress…" disabled={busy} /></div>}

@@ -93,15 +93,29 @@ const officialModels = inferSelections([
   { kind: 'diffusion_models', name: 'minimax_h3_fl2va_unsupported.gguf' },
   { kind: 'diffusion_models', name: 'minimax_h3_ref2va_pruned_int8_convrot.safetensors' },
   { kind: 'text_encoders', name: 'qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors' },
+  { kind: 'text_encoders', name: 'qwen3vl_32b_minimax_h3_int8_convrot.safetensors' },
   { kind: 'vae', name: 'minimax_h3_video_vae_fp16.safetensors' },
   { kind: 'vae', name: 'minimax_h3_audio_vae_fp32.safetensors' },
   { kind: 'loras', name: 'minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors' },
   { kind: 'loras', name: 'minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors' },
+  { kind: 'loras', name: 'minimax_h3_ref2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors' },
 ], '8')
 assert.equal(officialModels.fl2va, 'minimax_h3_fl2va_pruned_int8_convrot.safetensors')
-assert.equal(officialModels.ref2vLora, '')
+assert.equal(officialModels.textEncoder, 'qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors')
+assert.equal(inferSelections([
+  { kind: 'text_encoders', name: 'qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors' },
+  { kind: 'text_encoders', name: 'qwen3vl_32b_minimax_h3_int8_convrot.safetensors' },
+], 'off', 'quality').textEncoder, 'qwen3vl_32b_minimax_h3_int8_convrot.safetensors')
+assert.equal(inferSelections([{ kind: 'text_encoders', name: 'qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors' }], 'off', 'quality').textEncoder, '')
+assert.equal(officialModels.ref2vLora, 'minimax_h3_ref2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors')
 const refFour = inferSelections([{ kind: 'loras', name: 'minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors' }], '4')
 assert.equal(refFour.ref2vLora, 'minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors')
+const refEightGraph = buildMiniMaxWorkflow({ mode: 'reference', width: 1344, height: 768, prompt: 'test', duration: 5, seed: 1, steps: 30, turbo: '8', sampler: 'res_multistep', scheduler: 'simple', filenamePrefix: 'test', refImageSize: 'match' }, officialModels, { images: [{ name: 'ref.png' }], videos: [], audios: [] })
+assert.equal(refEightGraph['1'].inputs.unet_name, 'minimax_h3_ref2va_pruned_int8_convrot.safetensors')
+assert.equal(refEightGraph['5'].inputs.lora_name, 'minimax_h3_ref2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors')
+assert.equal(refEightGraph['5'].inputs.strength_model, 1)
+assert.equal(refEightGraph['10'].class_type, 'MiniMaxH3ReferenceToVideo')
+assert.equal(refEightGraph['14'].inputs.steps, 8)
 
 const ltxModels = { diffusion: 'ltx-distilled.safetensors', textEncoder: 'gemma4.safetensors', videoVae: 'video-vae.safetensors', audioVae: 'audio-vae.safetensors', latentUpscaler: 'latent-x2.safetensors' }
 for (const mode of ['text', 'image']) for (const preset of ['quality', 'turbo']) {

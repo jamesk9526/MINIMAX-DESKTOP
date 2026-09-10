@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { AlertCircle, Check, CircleStop, Disc3, Gauge, Headphones, LoaderCircle, Music2, Play, RotateCcw, Sparkles, WandSparkles } from 'lucide-react'
 import type { AceStepGenerationOptions, AceStepModelSelection, AppSettings, GenerationJob } from '../types'
+import { resolveLlmConnection } from '../lib/llmProvider'
 
 type MusicState = {
   model: 'sft' | 'base'
@@ -45,6 +46,7 @@ export function AceStepWorkspace({ settings, models, connected, pipelineReady, m
 }) {
   const initial = useMemo(readState, [])
   const [state, setState] = useState(initial)
+  const llm = resolveLlmConnection(settings)
   const [refining, setRefining] = useState(false)
   const [suggestion, setSuggestion] = useState('')
   const set = <K extends keyof MusicState>(key: K, value: MusicState[K]) => setState((current) => ({ ...current, [key]: value }))
@@ -59,10 +61,10 @@ export function AceStepWorkspace({ settings, models, connected, pipelineReady, m
   }, [models.base, models.sft, state.model])
 
   const refine = async () => {
-    if (!state.tags.trim() || !settings.ollamaModel) return
+    if (!state.tags.trim() || !llm.model) return
     setRefining(true); setSuggestion('')
     try {
-      const result = await window.minimax.generateWithOllama(settings.ollamaUrl, settings.ollamaModel, `Rewrite this as a concise production brief for ACE-Step 1.5 music generation. Preserve the intent and specify genre, mood, tempo feel, instruments, vocal character, arrangement, and production texture. Do not write lyrics. Return only the finished music direction.\n\nDRAFT:\n${state.tags.trim()}`)
+      const result = await window.minimax.generateWithOllama(llm.url, llm.model, `Rewrite this as a concise production brief for ACE-Step 1.5 music generation. Preserve the intent and specify genre, mood, tempo feel, instruments, vocal character, arrangement, and production texture. Do not write lyrics. Return only the finished music direction.\n\nDRAFT:\n${state.tags.trim()}`, llm.provider)
       setSuggestion(result)
     } finally { setRefining(false) }
   }
@@ -86,7 +88,7 @@ export function AceStepWorkspace({ settings, models, connected, pipelineReady, m
         </div></fieldset>
 
         <div className="field-group prompt-field ace-direction-field"><div className="field-label"><label htmlFor="ace-tags">Music direction</label><span>{state.tags.length.toLocaleString()} characters</span></div><textarea id="ace-tags" value={state.tags} onChange={(event) => set('tags', event.target.value)} placeholder="Genre, mood, instruments, vocal style, arrangement, and production texture…" />
-          <div className="prompt-tools"><div className="prompt-tool-buttons"><button type="button" onClick={() => void refine()} disabled={!ollamaAvailable || refining || !state.tags.trim()}>{refining ? <LoaderCircle size={14} className="spin" /> : <WandSparkles size={14} />}Refine music direction</button></div><span className={`local-model-chip ${ollamaAvailable ? 'online' : ''}`}><span />{ollamaAvailable ? settings.ollamaModel : 'Ollama offline'}</span></div>
+          <div className="prompt-tools"><div className="prompt-tool-buttons"><button type="button" onClick={() => void refine()} disabled={!ollamaAvailable || refining || !state.tags.trim()}>{refining ? <LoaderCircle size={14} className="spin" /> : <WandSparkles size={14} />}Refine music direction</button></div><span className={`local-model-chip ${ollamaAvailable ? 'online' : ''}`}><span />{ollamaAvailable ? llm.model : `${llm.label} offline`}</span></div>
           {suggestion && <div className="assistant-result"><div className="assistant-result-heading"><span><Sparkles size={14} />Local suggestion</span><small>Review before applying</small></div><textarea aria-label="ACE-Step music direction suggestion" value={suggestion} readOnly /><div className="assistant-actions"><button className="secondary-button" onClick={() => setSuggestion('')}>Dismiss</button><button className="primary-button" onClick={() => { set('tags', suggestion); setSuggestion('') }}><Check size={14} />Use suggestion</button></div></div>}
         </div>
 

@@ -24,12 +24,16 @@ export type GenerationDefaults = {
   shiftAudio: number
   loraStrength: number
   upscaleMode: UpscaleMode
+  textEncoderPreference: 'fast' | 'quality'
 }
 
 export type AppSettings = {
+  llmProvider: 'ollama' | 'lmstudio'
   comfyUrl: string
   ollamaUrl: string
   ollamaModel: string
+  lmStudioUrl: string
+  lmStudioModel: string
   modelRoot: string
   paths: Record<ModelKind, string>
   outputDirectory: string
@@ -165,7 +169,14 @@ export type Ltx25GenerationOptions = {
   prompt: string
   width: number
   height: number
+  renderWidth?: number
+  renderHeight?: number
   duration: number
+  turbo?: 'off' | '4' | '8'
+  steps?: number
+  noDialogue?: boolean
+  naturalMovement?: boolean
+  loraStrength?: number
   seed: number
   preset: 'quality' | 'turbo'
   filenamePrefix: string
@@ -272,7 +283,14 @@ export type GenerationJob = {
   error?: string
   width: number
   height: number
+  renderWidth?: number
+  renderHeight?: number
   duration: number
+  turbo?: 'off' | '4' | '8'
+  steps?: number
+  noDialogue?: boolean
+  naturalMovement?: boolean
+  loraStrength?: number
   provider?: 'minimax' | 'ltx25' | 'acestep'
   mediaType?: 'video' | 'audio'
   movieLink?: { projectId: string; sceneId: string; shotId: string }
@@ -307,10 +325,12 @@ export type DesktopApi = {
   joinVideos(clips: Array<Pick<ClipItem, 'source' | 'start' | 'end'>>, outputDirectory: string, ffmpegPath: string): Promise<{ path: string; url: string }>
   showOutput(path: string): Promise<void>
   findLatestOutput(outputDirectory: string, since: number, kind?: 'video' | 'audio'): Promise<string | null>
-  listOllamaModels(url: string): Promise<OllamaModel[]>
-  generateWithOllama(url: string, model: string, prompt: string): Promise<string>
-  generateStructuredWithOllama(url: string, model: string, prompt: string, schema: Record<string, unknown>): Promise<unknown>
+  listOllamaModels(url: string, provider?: AppSettings['llmProvider']): Promise<OllamaModel[]>
+  generateWithOllama(url: string, model: string, prompt: string, provider?: AppSettings['llmProvider']): Promise<string>
+  generateWithOllamaVision(url: string, model: string, prompt: string, imagePaths: string[], provider?: AppSettings['llmProvider']): Promise<string>
+  generateStructuredWithOllama(url: string, model: string, prompt: string, schema: Record<string, unknown>, provider?: AppSettings['llmProvider']): Promise<unknown>
   getLanStatus(): Promise<LanStatus>
   syncMobileCharacters(characters: unknown[]): Promise<{ synced: number }>
   rotateLanToken(): Promise<LanStatus>
+  setWindowAlwaysOnTop(enabled: boolean): Promise<boolean>
 }

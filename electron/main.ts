@@ -26,12 +26,16 @@ type GenerationDefaults = {
   shiftAudio: number
   loraStrength: number
   upscaleMode: 'off' | 'ltx' | 'rtx'
+  textEncoderPreference: 'fast' | 'quality'
 }
 
 type AppSettings = {
+  llmProvider: 'ollama' | 'lmstudio'
   comfyUrl: string
   ollamaUrl: string
   ollamaModel: string
+  lmStudioUrl: string
+  lmStudioModel: string
   modelRoot: string
   paths: Record<ModelKind, string>
   outputDirectory: string
@@ -131,9 +135,12 @@ app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required')
 function defaultSettings(): AppSettings {
   const root = join(app.getPath('documents'), 'ComfyUI', 'models')
   return {
+    llmProvider: 'ollama',
     comfyUrl: 'http://127.0.0.1:8188',
     ollamaUrl: 'http://127.0.0.1:11434',
     ollamaModel: 'qwen3:latest',
+    lmStudioUrl: 'http://127.0.0.1:1234',
+    lmStudioModel: '',
     modelRoot: root,
     paths: Object.fromEntries(modelKinds.map((kind) => [kind, join(root, kind)])) as Record<ModelKind, string>,
     outputDirectory: join(app.getPath('documents'), 'ComfyUI', 'output'),
@@ -141,7 +148,7 @@ function defaultSettings(): AppSettings {
     generationDefaults: {
       resolution: '1344x768', duration: 5, turbo: 'off', steps: 30,
       sampler: 'res_multistep', scheduler: 'simple', experimentalSampling: false,
-      refImageSize: 'match', livePreview: true, sigmaShiftMode: 'model', shiftVideo: 12, shiftAudio: 3, loraStrength: 1, upscaleMode: 'off',
+      refImageSize: 'match', livePreview: true, sigmaShiftMode: 'model', shiftVideo: 12, shiftAudio: 3, loraStrength: 1, upscaleMode: 'off', textEncoderPreference: 'fast',
     },
   }
 }
@@ -151,6 +158,44 @@ function finalOllamaAnswer(value: string) {
   const unclosedThink = answer.search(/<(?:think|analysis)\b[^>]*>/i)
   if (unclosedThink >= 0) answer = answer.slice(0, unclosedThink)
   return answer.replace(/<\/?(?:think|analysis)\b[^>]*>/gi, '').trim()
+}
+
+type LlmProvider = AppSettings['llmProvider']
+
+function lmStudioPath(url: string, path: string) {
+  return /\/v1\/?$/i.test(cleanUrl(url)) ? path : `/v1${path}`
+}
+
+function assertLocalLmStudioUrl(value: string) {
+  let parsed: URL
+  try { parsed = new URL(value) } catch { throw new Error('Enter a valid LM Studio server URL.') }
+  const hostname = parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase()
+  if (!['127.0.0.1', 'localhost', '::1'].includes(hostname)) throw new Error('LM Studio is restricted to this computer. Use localhost, 127.0.0.1, or ::1.')
+  if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('LM Studio must use an HTTP or HTTPS URL.')
+}
+
+async function listLlmModels(url: string, provider: LlmProvider) {
+  if (provider === 'lmstudio') {
+    assertLocalLmStudioUrl(url)
+    const result = await comfyFetch(url, lmStudioPath(url, '/models')) as { data?: Array<{ id?: string; owned_by?: string }> }
+    return (result.data ?? []).filter((model) => model.id).map((model) => ({ name: model.id!, size: 0, family: model.owned_by ?? 'lmstudio', parameterSize: '', local: true }))
+  }
+  const data = await comfyFetch(url, '/api/tags') as { models?: Array<{ name: string; size?: number; remote_model?: string; details?: { family?: string; parameter_size?: string } }> }
+  return (data.models ?? []).map((model) => ({ name: model.name, size: model.size ?? 0, family: model.details?.family ?? '', parameterSize: model.details?.parameter_size ?? '', local: !model.remote_model && model.size !== 342 }))
+}
+
+async function generateWithLlm(url: string, model: string, prompt: string, provider: LlmProvider) {
+  if (provider === 'lmstudio') {
+    assertLocalLmStudioUrl(url)
+    const data = await comfyFetch(url, lmStudioPath(url, '/chat/completions'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model, messages: [{ role: 'user', content: prompt }], stream: false, temperature: 0.65, max_tokens: 1800 }) }) as { choices?: Array<{ message?: { content?: string } }>; error?: { message?: string } | string }
+    const answer = finalOllamaAnswer(data.choices?.[0]?.message?.content ?? '')
+    if (!answer) throw new Error(typeof data.error === 'string' ? data.error : data.error?.message || 'LM Studio returned an empty response.')
+    return answer
+  }
+  const data = await comfyFetch(url, '/api/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model, prompt, stream: false, think: false, options: { temperature: 0.65, num_predict: 1200 } }) }) as { response?: string; error?: string }
+  const answer = data.response ? finalOllamaAnswer(data.response) : ''
+  if (!answer) throw new Error(data.error || 'Ollama returned an empty response.')
+  return answer
 }
 
 function settingsPath() {
@@ -183,7 +228,8 @@ async function loadSettings(): Promise<AppSettings> {
     const generationDefaults = { ...defaults.generationDefaults, ...raw.generationDefaults }
     generationDefaults.steps = Math.max(16, Math.min(30, Number(generationDefaults.steps) || 30))
     if (raw.generationDefaults?.steps === 20) generationDefaults.steps = 30
-    return { ...defaults, ...raw, paths: { ...defaults.paths, ...raw.paths }, generationDefaults }
+    generationDefaults.textEncoderPreference = raw.generationDefaults?.textEncoderPreference === 'quality' ? 'quality' : 'fast'
+    return { ...defaults, ...raw, llmProvider: raw.llmProvider === 'lmstudio' ? 'lmstudio' : 'ollama', paths: { ...defaults.paths, ...raw.paths }, generationDefaults }
   } catch {
     return defaultSettings()
   }
@@ -373,9 +419,11 @@ async function handleLanRequest(request: IncomingMessage, response: ServerRespon
           const vaes = comfyChoices(info, 'VAELoader', 'vae_name')
           const ltxUpscaleMissing = ltxUpscaleRequiredNodes.filter((node) => !info[node])
           const ltxNativeMissing = ltxNativeRequiredNodes.filter((node) => !info[node])
-          const ollama = await comfyFetch(settings.ollamaUrl, '/api/tags').catch(() => ({ models: [] })) as { models?: Array<{ name?: string; size?: number; remote_model?: string }> }
-          const ollamaModels = (ollama.models ?? []).filter((item) => item.name && !item.remote_model && item.size !== 342).map((item) => item.name as string)
-          return sendJson(response, 200, { connected: true, latencyMs: Date.now() - started, models: groups.flat(), upscalers, ltxModel: latentUpscalers.find((name) => /ltx-2\.5.*spatial.*x2/i.test(name)) ?? '', ltxVae: vaes.find((name) => /ltx-2\.5.*video.*vae/i.test(name)) ?? '', ltxUpscaleReady: ltxUpscaleMissing.length === 0, ltxUpscaleMissing, ltxNativeReady: ltxNativeMissing.length === 0, ltxNativeMissing, ollamaModels, ollamaModel: settings.ollamaModel })
+          const llmProvider = settings.llmProvider ?? 'ollama'
+          const llmUrl = llmProvider === 'lmstudio' ? settings.lmStudioUrl : settings.ollamaUrl
+          const llmModel = llmProvider === 'lmstudio' ? settings.lmStudioModel : settings.ollamaModel
+          const llmModels = await listLlmModels(llmUrl, llmProvider).catch(() => [])
+          return sendJson(response, 200, { connected: true, latencyMs: Date.now() - started, models: groups.flat(), upscalers, ltxModel: latentUpscalers.find((name) => /ltx-2\.5.*spatial.*x2/i.test(name)) ?? '', ltxVae: vaes.find((name) => /ltx-2\.5.*video.*vae/i.test(name)) ?? '', ltxUpscaleReady: ltxUpscaleMissing.length === 0, ltxUpscaleMissing, ltxNativeReady: ltxNativeMissing.length === 0, ltxNativeMissing, ollamaModels: llmModels.map((item) => item.name), ollamaModel: llmModel, llmProvider, llmModels: llmModels.map((item) => item.name), llmModel })
         } catch (error) {
           return sendJson(response, 200, { connected: false, latencyMs: Date.now() - started, models: groups.flat(), error: error instanceof Error ? error.message : String(error) })
         }
@@ -415,10 +463,11 @@ async function handleLanRequest(request: IncomingMessage, response: ServerRespon
         const body = await readJson(request, 80_000)
         const prompt = typeof body.prompt === 'string' ? body.prompt.trim() : ''
         if (!prompt || prompt.length > 50_000) return sendJson(response, 400, { error: 'A shorter prompt-assistant request is required.' })
-        const data = await comfyFetch(settings.ollamaUrl, '/api/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: settings.ollamaModel, prompt, stream: false, think: false, options: { temperature: 0.6, num_predict: 1200 } }) }) as { response?: string; error?: string }
-        if (!data.response) return sendJson(response, 502, { error: data.error || 'Ollama returned an empty response.' })
-        const answer = finalOllamaAnswer(data.response)
-        if (!answer) return sendJson(response, 502, { error: 'Ollama returned reasoning without a final answer.' })
+        const provider = settings.llmProvider ?? 'ollama'
+        const llmUrl = provider === 'lmstudio' ? settings.lmStudioUrl : settings.ollamaUrl
+        const llmModel = provider === 'lmstudio' ? settings.lmStudioModel : settings.ollamaModel
+        if (!llmModel) return sendJson(response, 503, { error: `No ${provider === 'lmstudio' ? 'LM Studio' : 'Ollama'} model is selected.` })
+        const answer = await generateWithLlm(llmUrl, llmModel, prompt, provider)
         return sendJson(response, 200, { response: answer })
       }
       if (url.pathname === '/api/lan/cancel' && request.method === 'POST') {
@@ -528,6 +577,27 @@ function createWindow() {
     },
   })
   window.setMenuBarVisibility(false)
+  window.webContents.setWindowOpenHandler(({ url }) => {
+    if (url !== 'about:blank') return { action: 'deny' }
+    return {
+      action: 'allow',
+      overrideBrowserWindowOptions: {
+        width: 560,
+        height: 780,
+        minWidth: 420,
+        minHeight: 560,
+        backgroundColor: '#0d100f',
+        titleBarStyle: 'hidden',
+        titleBarOverlay: { color: '#101412', symbolColor: '#d9e2dc', height: 42 },
+        webPreferences: {
+          preload: join(__dirname, 'preload.js'),
+          contextIsolation: true,
+          nodeIntegration: false,
+        },
+      },
+    }
+  })
+  window.webContents.on('did-create-window', (child) => child.setMenuBarVisibility(false))
   const devUrl = process.env.VITE_DEV_SERVER_URL
   if (devUrl) void window.loadURL(devUrl)
   else void window.loadFile(join(__dirname, '..', 'dist', 'index.html'))
@@ -567,6 +637,12 @@ app.whenReady().then(async () => {
   })
   ipcMain.handle('settings:get', () => loadSettings())
   ipcMain.handle('system:gpu-telemetry', () => readGpuTelemetry())
+  ipcMain.handle('window:set-always-on-top', (event, enabled: boolean) => {
+    const target = BrowserWindow.fromWebContents(event.sender)
+    if (!target) return false
+    target.setAlwaysOnTop(Boolean(enabled), 'floating')
+    return target.isAlwaysOnTop()
+  })
   ipcMain.handle('lan:status', () => lanStatus)
   ipcMain.handle('lan:sync-characters', (_event, characters: unknown[]) => { mobileCharacterLibrary = Array.isArray(characters) ? characters : []; return { synced: mobileCharacterLibrary.length } })
   ipcMain.handle('lan:rotate-token', async () => {
@@ -687,32 +763,36 @@ app.whenReady().then(async () => {
     form.append('overwrite', 'true')
     return comfyFetch(url, '/upload/image', { method: 'POST', body: form })
   })
-  ipcMain.handle('ollama:list', async (_event, url: string) => {
-    const data = await comfyFetch(url, '/api/tags') as { models?: Array<{ name: string; size?: number; remote_model?: string; details?: { family?: string; parameter_size?: string } }> }
-    return (data.models ?? []).map((model) => ({
-      name: model.name,
-      size: model.size ?? 0,
-      family: model.details?.family ?? '',
-      parameterSize: model.details?.parameter_size ?? '',
-      local: !model.remote_model && model.size !== 342,
-    }))
-  })
-  ipcMain.handle('ollama:generate', async (_event, url: string, model: string, prompt: string) => {
-    const data = await comfyFetch(url, '/api/generate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, prompt, stream: false, think: false, options: { temperature: 0.65, num_predict: 1200 } }),
-    }) as { response?: string; error?: string }
-    if (!data.response) throw new Error(data.error || 'Ollama returned an empty response.')
-    const answer = finalOllamaAnswer(data.response)
-    if (!answer) throw new Error('Ollama returned reasoning without a final answer.')
+  ipcMain.handle('ollama:list', async (_event, url: string, provider: LlmProvider = 'ollama') => listLlmModels(url, provider))
+  ipcMain.handle('ollama:generate', async (_event, url: string, model: string, prompt: string, provider: LlmProvider = 'ollama') => generateWithLlm(url, model, prompt, provider))
+  ipcMain.handle('ollama:vision', async (_event, url: string, model: string, prompt: string, imagePaths: string[], provider: LlmProvider = 'ollama') => {
+    const allowedImages = new Set(['.png', '.jpg', '.jpeg', '.webp'])
+    const validPaths = [...new Set(imagePaths)].filter((filePath) => existsSync(filePath) && allowedImages.has(extname(filePath).toLowerCase())).slice(0, 6)
+    const images: Array<{ base64: string; mime: string }> = []
+    for (const filePath of validPaths) {
+      const bytes = await readFile(filePath)
+      if (bytes.length <= 25_000_000) {
+        const extension = extname(filePath).toLowerCase()
+        const mime = extension === '.png' ? 'image/png' : extension === '.webp' ? 'image/webp' : 'image/jpeg'
+        images.push({ base64: bytes.toString('base64'), mime })
+      }
+    }
+    if (!images.length) throw new Error('No readable local reference images were available to the copilot.')
+    if (provider === 'lmstudio') assertLocalLmStudioUrl(url)
+    const data = provider === 'lmstudio'
+      ? await comfyFetch(url, lmStudioPath(url, '/chat/completions'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }, ...images.map((image) => ({ type: 'image_url', image_url: { url: `data:${image.mime};base64,${image.base64}` } }))] }], stream: false, temperature: 0.45, max_tokens: 1800 }) }) as { choices?: Array<{ message?: { content?: string } }>; error?: { message?: string } | string }
+      : await comfyFetch(url, '/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model, messages: [{ role: 'user', content: prompt, images: images.map((image) => image.base64) }], stream: false, think: false, options: { temperature: 0.45, num_predict: 1800 } }) }) as { message?: { content?: string }; error?: string }
+    const answer = provider === 'lmstudio' ? finalOllamaAnswer(('choices' in data ? data.choices?.[0]?.message?.content : '') ?? '') : finalOllamaAnswer(('message' in data ? data.message?.content : '') ?? '')
+    const error = 'error' in data ? data.error : undefined
+    if (!answer) throw new Error(typeof error === 'string' ? error : error?.message || `${provider === 'lmstudio' ? 'LM Studio' : 'Ollama'} could not inspect the supplied reference images. Choose a local vision-capable model in Settings.`)
     return answer
   })
-  ipcMain.handle('ollama:structured', async (_event, url: string, model: string, prompt: string, schema: Record<string, unknown>) => {
-    const data = await comfyFetch(url, '/api/chat', {
+  ipcMain.handle('ollama:structured', async (_event, url: string, model: string, prompt: string, schema: Record<string, unknown>, provider: LlmProvider = 'ollama') => {
+    if (provider === 'lmstudio') assertLocalLmStudioUrl(url)
+    const data = await comfyFetch(url, provider === 'lmstudio' ? lmStudioPath(url, '/chat/completions') : '/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+      body: JSON.stringify(provider === 'lmstudio' ? { model, messages: [{ role: 'user', content: prompt }], stream: false, response_format: { type: 'json_schema', json_schema: { name: 'minimax_studio_response', strict: true, schema } }, temperature: 0.2, max_tokens: 6000 } : {
         model,
         messages: [{ role: 'user', content: prompt }],
         stream: false,
@@ -720,11 +800,11 @@ app.whenReady().then(async () => {
         format: schema,
         options: { temperature: 0.2, num_predict: 6000 },
       }),
-    }) as { message?: { content?: string }; error?: string }
-    const content = data.message?.content ? finalOllamaAnswer(data.message.content) : ''
-    if (!content) throw new Error(data.error || 'Ollama returned an empty movie plan.')
+    }) as { message?: { content?: string }; choices?: Array<{ message?: { content?: string } }>; error?: string | { message?: string } }
+    const content = finalOllamaAnswer(provider === 'lmstudio' ? data.choices?.[0]?.message?.content ?? '' : data.message?.content ?? '')
+    if (!content) throw new Error(typeof data.error === 'string' ? data.error : data.error?.message || `${provider === 'lmstudio' ? 'LM Studio' : 'Ollama'} returned an empty structured response.`)
     try { return JSON.parse(content) }
-    catch { throw new Error('Ollama returned a movie plan that was not valid JSON.') }
+    catch { throw new Error(`${provider === 'lmstudio' ? 'LM Studio' : 'Ollama'} returned a response that was not valid JSON.`) }
   })
   ipcMain.handle('file:data-url', async (_event, filePath: string) => {
     const extension = extname(filePath).toLowerCase()

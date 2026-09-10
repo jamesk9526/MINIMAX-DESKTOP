@@ -2,9 +2,12 @@ import type { AppSettings, DesktopApi, ModelFile } from './types'
 
 const modelRoot = 'C:\\Users\\James\\Documents\\ComfyUI\\models'
 const settings: AppSettings = {
+  llmProvider: 'ollama',
   comfyUrl: 'http://127.0.0.1:8188',
   ollamaUrl: 'http://127.0.0.1:11434',
   ollamaModel: 'qwen3:latest',
+  lmStudioUrl: 'http://127.0.0.1:1234',
+  lmStudioModel: '',
   modelRoot,
   paths: {
     diffusion_models: `${modelRoot}\\diffusion_models`,
@@ -19,7 +22,7 @@ const settings: AppSettings = {
   generationDefaults: {
     resolution: '1344x768', duration: 5, turbo: 'off', steps: 30,
     sampler: 'res_multistep', scheduler: 'simple', experimentalSampling: false,
-    refImageSize: 'match', livePreview: true, sigmaShiftMode: 'model', shiftVideo: 12, shiftAudio: 3, loraStrength: 1, upscaleMode: 'off',
+    refImageSize: 'match', livePreview: true, sigmaShiftMode: 'model', shiftVideo: 12, shiftAudio: 3, loraStrength: 1, upscaleMode: 'off', textEncoderPreference: 'fast',
   },
 }
 
@@ -27,6 +30,7 @@ const examples: Array<[ModelFile['kind'], string, number]> = [
   ['diffusion_models', 'minimax_h3_fl2va_pruned_int8_convrot.safetensors', 20_970_379_616],
   ['diffusion_models', 'minimax_h3_ref2va_pruned_int8_convrot.safetensors', 20_970_379_616],
   ['text_encoders', 'qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors', 15_687_142_551],
+  ['text_encoders', 'qwen3vl_32b_minimax_h3_int8_convrot.safetensors', 27_100_000_000],
   ['vae', 'minimax_h3_video_vae_fp16.safetensors', 5_207_808_496],
   ['vae', 'minimax_h3_audio_vae_fp32.safetensors', 605_254_808],
   ['vae_approx', 'taeh3_decoder.safetensors', 39_458_084],
@@ -88,11 +92,14 @@ export function installBrowserMock() {
     joinVideos: async () => { throw new Error('Open the desktop app to join videos.') },
     showOutput: async () => undefined,
     findLatestOutput: async () => null,
-    listOllamaModels: async () => [
-      { name: 'qwen3:latest', size: 5_225_388_164, family: 'qwen3', parameterSize: '8.2B', local: true },
-      { name: 'llama3.1:8b', size: 4_920_753_328, family: 'llama', parameterSize: '8.0B', local: true },
-    ],
+    listOllamaModels: async (_url, provider = 'ollama') => provider === 'lmstudio'
+      ? [{ name: 'local-vision-model', size: 0, family: 'lmstudio', parameterSize: '', local: true }]
+      : [
+        { name: 'qwen3:latest', size: 5_225_388_164, family: 'qwen3', parameterSize: '8.2B', local: true },
+        { name: 'llama3.1:8b', size: 4_920_753_328, family: 'llama', parameterSize: '8.0B', local: true },
+      ],
     generateWithOllama: async () => 'A cinematic wide shot with deliberate subject motion, controlled camera movement, natural lighting, and synchronized environmental audio.',
+    generateWithOllamaVision: async () => 'A MiniMax-ready prompt grounded in the visible identity, composition, lighting, and continuity details of the supplied reference images.',
     generateStructuredWithOllama: async (_url, _model, prompt, schema) => {
       const properties = schema.properties as Record<string, unknown> | undefined
       if (properties?.reply) {
@@ -127,6 +134,7 @@ export function installBrowserMock() {
     getLanStatus: async () => ({ running: true, url: `${location.origin}/?mobile=1&token=browser-preview`, desktopUrl: `${location.origin}/?desktop=1&token=browser-preview`, port: Number(location.port) }),
     syncMobileCharacters: async (characters) => ({ synced: characters.length }),
     rotateLanToken: async () => ({ running: true, url: `${location.origin}/?mobile=1&token=browser-preview`, desktopUrl: `${location.origin}/?desktop=1&token=browser-preview`, port: Number(location.port) }),
+    setWindowAlwaysOnTop: async (enabled) => enabled,
   }
   window.minimax = api
 }

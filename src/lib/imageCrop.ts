@@ -15,9 +15,10 @@ export function cropRect(sw: number, sh: number, width: number, height: number, 
 }
 
 export async function drawPreparedImage(canvas: HTMLCanvasElement, file: MediaFile, width: number, height: number) {
-  if (!file.preview) throw new Error(`No preview available for ${file.name}. Choose the image again.`)
+  const preview = file.preview || await window.minimax.fileDataUrl(file.path).catch(() => '')
+  if (!preview) throw new Error(`No preview available for ${file.name}. Choose the image again.`)
   const img = new Image()
-  img.src = file.preview
+  img.src = preview
   await img.decode()
   canvas.width = width
   canvas.height = height

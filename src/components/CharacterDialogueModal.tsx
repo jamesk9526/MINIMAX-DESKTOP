@@ -16,6 +16,7 @@ type CharacterDialogueModalProps = {
   duration: number
   generating: boolean
   ollamaAvailable: boolean
+  providerLabel: string
   onClose(): void
   onGenerate(draft: CharacterDialogueDraft): Promise<string>
   onInsert(text: string): void
@@ -23,7 +24,7 @@ type CharacterDialogueModalProps = {
 
 const deliveryOptions = ['Natural and conversational', 'Warm and reassuring', 'Quiet and intimate', 'Confident and direct', 'Tense and restrained', 'Urgent and breathless', 'Dry and understated', 'Playful and energetic']
 
-export function CharacterDialogueModal({ characters, duration, generating, ollamaAvailable, onClose, onGenerate, onInsert }: CharacterDialogueModalProps) {
+export function CharacterDialogueModal({ characters, duration, generating, ollamaAvailable, providerLabel, onClose, onGenerate, onInsert }: CharacterDialogueModalProps) {
   const titleId = useId()
   const descriptionId = useId()
   const closeRef = useRef<HTMLButtonElement>(null)
@@ -96,7 +97,7 @@ export function CharacterDialogueModal({ characters, duration, generating, ollam
               <label><span>Language</span><input value={language} onChange={(event) => setLanguage(event.target.value)} placeholder="English" /></label>
               <label><span>Required words <em>Optional</em></span><input value={requiredWords} onChange={(event) => setRequiredWords(event.target.value)} placeholder="Exact phrase to preserve" /></label>
             </div>
-            <div className="dialogue-generate-row"><small>{ollamaAvailable ? `Designed for a ${duration}-second shot. Keep room for action and reaction.` : 'Ollama is offline. You can still write the spoken line manually below.'}</small><button className="secondary-button" type="button" title={ollamaAvailable ? 'Generate one dialogue line with the configured local model' : 'Configure a local Ollama model in Settings'} disabled={!character || !intent.trim() || generating || !ollamaAvailable} onClick={() => void generate()}>{generating ? <LoaderCircle className="spin" size={14} /> : <Sparkles size={14} />}{generating ? 'Writing…' : 'Generate with Ollama'}</button></div>
+            <div className="dialogue-generate-row"><small>{ollamaAvailable ? `Designed for a ${duration}-second shot. Keep room for action and reaction.` : `${providerLabel} is offline. You can still write the spoken line manually below.`}</small><button className="secondary-button" type="button" title={ollamaAvailable ? 'Generate one dialogue line with the configured local model' : `Configure ${providerLabel} in Settings`} disabled={!character || !intent.trim() || generating || !ollamaAvailable} onClick={() => void generate()}>{generating ? <LoaderCircle className="spin" size={14} /> : <Sparkles size={14} />}{generating ? 'Writing…' : `Generate with ${providerLabel}`}</button></div>
           </section>
           <section>
             <div className="dialogue-section-heading"><span>03</span><div><strong>Review</strong><small>Edit the exact spoken words before adding them to the production prompt.</small></div></div>

@@ -11,7 +11,8 @@ A local-first Windows desktop interface for MiniMax H3 generation through ComfyU
 - Mixed image, video, and audio references through the Ref2VA model
 - Non-destructive Ref2V video clipping: preview a longer source, set precise in/out points, and create or revise a focused 2–15 second reference MP4 without changing the original
 - Native synchronized video and stereo-audio decoding
-- Official ComfyUI H3 graph topology and sampling defaults, with detected FL2V 4/8-step and Ref2V 4-step turbo LoRAs
+- Official ComfyUI H3 graph topology and sampling defaults, with detected FL2V and Ref2V 4/8-step turbo LoRAs, including MiniMax H3 Turbo Ref2VA 8-Step v1.0 at 768p
+- Optional H3 text encoding: fast NVFP4-AWQ remains the default; select the slower, higher-quality `qwen3vl_32b_minimax_h3_int8_convrot.safetensors` encoder when it is installed
 - Local Ollama prompt enhancement, timed shot planning, and synchronized-audio rewriting
 - In-app playback through a range-aware local media proxy, using either ComfyUI history or the configured output directory
 - Z-Image Turbo first-frame generation using locally installed ComfyUI models
