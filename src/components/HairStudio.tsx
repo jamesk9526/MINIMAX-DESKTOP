@@ -6,6 +6,7 @@ import { buildZImage } from '../lib/zimage'
 import type { AppSettings, HairStyleProject, MediaFile } from '../types'
 import { ReferenceApprovalModal } from './ReferenceApprovalModal'
 import { resolveLlmConnection } from '../lib/llmProvider'
+import { analyzeReferenceImage } from '../lib/referenceAnalysis'
 
 function cleanPrompt(value: string) {
   return value.replace(/\\\s*(?:\r?\n|$)/g, ' ').replace(/[*_#`]+/g, '').replace(/\s+/g, ' ').trim()
@@ -50,7 +51,7 @@ export function HairStudio({ settings, info, connected, ollamaAvailable, onNotic
     } catch (cause) { onNotice('error', cause instanceof Error ? cause.message : String(cause)) }
     finally { setAssisting(false) }
   }
-  const chooseImage = async () => { const picked = await window.minimax.chooseMedia('image'); if (!picked) return; patch({ referenceImage: { ...picked, kind: 'image', preview: await window.minimax.mediaUrl(picked.path) } }) }
+  const chooseImage = async () => { const picked = await window.minimax.chooseMedia('image'); if (!picked) return; const projectId = active.id; patch({ referenceImage: { ...picked, kind: 'image', preview: await window.minimax.mediaUrl(picked.path) } }); if (!ollamaAvailable) { onNotice('neutral', 'Image added. Connect a local vision model to fill the hair profile automatically.'); return } onNotice('neutral', 'Image added. The local vision model is filling empty hair fields…'); try { const result = await analyzeReferenceImage(settings, picked.path, 'hair'); const current = loadHairStyleProjects().find((item) => item.id === projectId); if (!current) return; const textures = ['straight and sleek','soft waves','defined waves','loose curls','tight curls','coily natural texture','locs','box braids','cornrows','twists','buzzed texture','natural texture']; const lengths = ['shaved','cropped','ear length','chin length','shoulder length','medium length','mid-back length','waist length']; patchById(projectId, { name: !current.name.trim() || /^Hair design \d+$/i.test(current.name) ? result.name || current.name : current.name, description: current.description.trim() ? current.description : result.description, texture: current.texture !== 'natural texture' || !textures.includes(result.texture) ? current.texture : result.texture, length: current.length !== 'medium length' || !lengths.includes(result.length) ? current.length : result.length, color: current.color.trim() ? current.color : result.color, hairline: current.hairline !== 'natural hairline' ? current.hairline : result.hairline || current.hairline, finish: current.finish !== 'soft natural finish' ? current.finish : result.finish || current.finish, visualStyle: current.visualStyle !== 'high-end salon reference photography' ? current.visualStyle : result.visualStyle || current.visualStyle }); onNotice('success', 'Existing image analyzed; empty hair fields were filled for review.') } catch (reason) { onNotice('error', `The image was added, but automatic description failed: ${reason instanceof Error ? reason.message : String(reason)}`) } }
   const createReference = async () => {
     if (!zReady || busy || !active.name.trim()) return
     setBusy(true); setError(false); setMessage('Submitting the hairstyle design board…')

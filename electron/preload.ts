@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld('minimax', {
   uploadImageData: (url: string, data: string) => ipcRenderer.invoke('comfy:upload-data', url, data),
   getOutputImage: (url: string, file: unknown) => ipcRenderer.invoke('comfy:output-image', url, file),
   saveComfyOutputImage: (url: string, file: unknown, outputDirectory: string) => ipcRenderer.invoke('comfy:save-output-image', url, file, outputDirectory),
+  saveStillImage: (url: string, file: unknown, outputDirectory: string) => ipcRenderer.invoke('comfy:save-still-image', url, file, outputDirectory),
   getSettings: () => ipcRenderer.invoke('settings:get'),
   getGpuTelemetry: () => ipcRenderer.invoke('system:gpu-telemetry'),
   saveSettings: (settings: unknown) => ipcRenderer.invoke('settings:save', settings),

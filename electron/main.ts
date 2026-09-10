@@ -732,6 +732,22 @@ app.whenReady().then(async () => {
     await writeFile(target, Buffer.from(await response.arrayBuffer()))
     return { path: target, name: basename(target) }
   })
+  ipcMain.handle('comfy:save-still-image', async (_event, url: string, file: { filename: string; subfolder?: string; type?: string }, requestedOutput: string) => {
+    const settings = await loadSettings()
+    const outputDirectory = normalize(requestedOutput)
+    if (outputDirectory.toLowerCase() !== normalize(settings.outputDirectory).toLowerCase()) throw new Error('Reference stills must be saved inside the configured output folder.')
+    const query = new URLSearchParams({ filename: basename(file.filename), subfolder: file.subfolder ?? '', type: file.type ?? 'output' })
+    const response = await fetch(`${cleanUrl(url)}/view?${query}`)
+    if (!response.ok) throw new Error(`Reference still download failed (${response.status}).`)
+    const mime = response.headers.get('content-type')?.split(';')[0] ?? ''
+    const extension = mime === 'image/jpeg' ? '.jpg' : mime === 'image/webp' ? '.webp' : mime === 'image/png' ? '.png' : ''
+    if (!extension) throw new Error('ComfyUI did not return a supported reference still.')
+    const directory = join(outputDirectory, 'MiniMax Reference Stills')
+    await mkdir(directory, { recursive: true })
+    const target = join(directory, `ref2va-still-${Date.now()}-${randomUUID().slice(0, 8)}${extension}`)
+    await writeFile(target, Buffer.from(await response.arrayBuffer()))
+    return { path: target, name: basename(target) }
+  })
   ipcMain.handle('comfy:history', (_event, url: string, promptId: string) => comfyFetch(url, `/history/${encodeURIComponent(promptId)}`))
   ipcMain.handle('comfy:cancel', async (_event, url: string, promptId: string) => {
     if (!promptId || typeof promptId !== 'string') throw new Error('A ComfyUI prompt ID is required to cancel a generation.')

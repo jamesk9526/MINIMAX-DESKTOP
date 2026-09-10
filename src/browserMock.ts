@@ -74,6 +74,7 @@ export function installBrowserMock() {
     uploadImageData: async () => { throw new Error('Open the desktop app to upload images.') },
     getOutputImage: async () => { throw new Error('Open the desktop app to retrieve images.') },
     saveComfyOutputImage: async () => { throw new Error('Open the desktop app to save generated images.') },
+    saveStillImage: async () => { throw new Error('Open the desktop app to save generated stills.') },
     getSettings: async () => current,
     getGpuTelemetry: async () => ({ available: true, name: 'Preview GPU', usagePercent: 38, vramPercent: 62, vramUsedMb: 14880, vramTotalMb: 24000 }),
     saveSettings: async (next) => (current = next),

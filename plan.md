@@ -461,6 +461,16 @@ Next test gate: select a character with approved hair and wardrobe and confirm e
 
 Next test gate: open the QR link on a real phone, import one character with approved hair and wardrobe into Reference mode, submit/cancel a short render, preview and download the result, then open the complete Studio drawer at portrait and landscape sizes.
 
+### Feature Pass 19 — Reference intake and engine visibility (implemented)
+
+- Expand the H3 engine-stack audit so FL2VA, Ref2VA, FL2V Turbo 8, Ref2V Turbo 8, and optional Ref2V Turbo 4 are individually visible instead of hiding the reference route behind the Create workspace.
+- Analyze newly chosen existing images with the configured local Ollama or LM Studio vision model in Character, Hair, Wardrobe, Accessory, and Location studios.
+- Fill only blank or untouched starter fields with visible, role-specific descriptions while preserving the user's authored names and notes; keep the selected image when analysis is unavailable or fails.
+- Keep every existing resolution preset and add a Custom choice with width/height inputs, 32-pixel alignment checks, provider canvas limits, accessible invalid states, and responsive phone-width layout.
+- Add two optional user-LoRA slots directly in Output and quality. Exclude the automatic MiniMax Turbo adapters from these selections, chain selected adapters after Turbo in the ComfyUI graph, preserve per-slot strength, and prevent duplicate selection.
+
+Next test gate: use one vision-capable Ollama model and one text-only model to import each reference type, confirm authored fields are retained, then render H3 and LTX clips at several valid custom sizes and confirm invalid dimensions never reach ComfyUI.
+
 Research basis: current work finds a real identity-versus-motion tradeoff, while multi-shot systems improve consistency through shared references/features, approved anchor frames, and separate shot/temporal memory. Relevant sources: https://arxiv.org/abs/2412.07750, https://arxiv.org/abs/2512.11274, and https://openaccess.thecvf.com/content/CVPR2025/html/Kara_ShotAdapter_Text-to-Multi-Shot_Video_Generation_with_Diffusion_Models_CVPR_2025_paper.html
 
 ### Phase 1 — Planning foundation

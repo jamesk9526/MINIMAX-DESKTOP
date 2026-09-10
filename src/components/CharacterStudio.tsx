@@ -12,6 +12,7 @@ import { characterAppearancePresets, characterPerformancePresets, characterVisua
 import { COPILOT_DECISION_EVENT, offerCopilotSuggestion } from '../lib/copilot'
 import { createId } from '../lib/createId'
 import { resolveLlmConnection } from '../lib/llmProvider'
+import { analyzeReferenceImage } from '../lib/referenceAnalysis'
 import type { AppSettings, CharacterProject, GenerationJob, MediaFile } from '../types'
 
 function cleanSinglePrompt(value: string) {
@@ -105,11 +106,26 @@ export function CharacterStudio({ settings, info, connected, ollamaAvailable, au
   const chooseImage = async (target: 'base' | 'reference') => {
     const picked = await window.minimax.chooseMedia('image')
     if (!picked) return
+    const projectId = active.id
     const file: MediaFile = { ...picked, kind: 'image', preview: await window.minimax.mediaUrl(picked.path) }
     patch(target === 'base' ? { baseImage: file } : {
       referenceImages: [...active.referenceImages, file],
       selectedReferencePaths: active.selectedReferencePaths === undefined ? undefined : [...active.selectedReferencePaths, file.path],
     })
+    if (!ollamaAvailable) { onNotice('neutral', `Image added. Connect a local vision model to fill the ${target === 'base' ? 'character profile' : 'missing profile fields'} automatically.`); return }
+    onNotice('neutral', 'Image added. The local vision model is filling empty character fields…')
+    try {
+      const result = await analyzeReferenceImage(settings, picked.path, 'character')
+      const current = loadCharacterProjects().find((item) => item.id === projectId)
+      if (!current) return
+      patchProject(projectId, {
+        name: !current.name.trim() || /^Character \d+$/i.test(current.name) ? result.name || current.name : current.name,
+        description: current.description.trim() ? current.description : result.description,
+        hairPreset: current.hairPreset.trim() ? current.hairPreset : result.hairPreset,
+        visualStyle: current.visualStyle.trim() && current.visualStyle !== 'cinematic photorealism' ? current.visualStyle : result.visualStyle || current.visualStyle,
+      })
+      onNotice('success', 'Existing image analyzed; empty character fields were filled for review.')
+    } catch (reason) { onNotice('error', `The image was added, but automatic description failed: ${reason instanceof Error ? reason.message : String(reason)}`) }
   }
   const addDetailReference = () => patch({ detailReferences: [...active.detailReferences, { id: createId(), label: '', notes: '', images: [] }] })
   const patchDetailReference = (id: string, change: Partial<CharacterProject['detailReferences'][number]>) => patch({ detailReferences: active.detailReferences.map((detail) => detail.id === id ? { ...detail, ...change } : detail) })

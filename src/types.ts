@@ -4,6 +4,7 @@ export type ModelKind = 'diffusion_models' | 'text_encoders' | 'vae' | 'loras' |
 export type MediaKind = 'image' | 'video' | 'audio'
 export type UpscaleMode = 'off' | 'ltx' | 'rtx'
 export type Turbo8Profile = 'stable' | 'balanced' | 'motion'
+export type AppliedLora = { name: string; strength: number }
 export type ReferencePurpose = 'character' | 'character-angle' | 'detail' | 'hair' | 'wardrobe' | 'accessory' | 'location' | 'continuity' | 'product' | 'style' | 'generic'
 export type PromptPresetCategory = 'camera' | 'shot' | 'angle' | 'lens' | 'lighting' | 'audio' | 'style' | 'movement' | 'transition' | 'character' | 'wardrobe' | 'location'
 export type PromptPreset = { id: string; category: PromptPresetCategory; label: string; keywords: string[]; description: string; insertion: string }
@@ -225,6 +226,7 @@ export type GenerationOptions = {
   experimentalSampling?: boolean
   previewOverride?: { frames: number; fps: number; nodeType?: string; vaeName?: string; jpegQuality?: number }
   loraStrength?: number
+  userLoras?: AppliedLora[]
   sampler: string
   scheduler: string
   refImageSize: 'match' | 'max'
@@ -290,6 +292,13 @@ export type GenerationJob = {
   estimatedSamplerStepMs?: number
   outputUrl?: string
   localOutputPath?: string
+  seed?: number
+  referenceAssets?: string[]
+  sourceMode?: 'ref2va-still'
+  modelName?: string
+  sampler?: string
+  scheduler?: string
+  refImageSize?: 'match' | 'max'
   error?: string
   width: number
   height: number
@@ -302,8 +311,9 @@ export type GenerationJob = {
   noDialogue?: boolean
   naturalMovement?: boolean
   loraStrength?: number
+  userLoras?: AppliedLora[]
   provider?: 'minimax' | 'ltx25' | 'acestep'
-  mediaType?: 'video' | 'audio'
+  mediaType?: 'video' | 'audio' | 'image'
   movieLink?: { projectId: string; sceneId: string; shotId: string }
   characterProjectId?: string
   locationProjectId?: string
@@ -316,6 +326,7 @@ export type DesktopApi = {
   uploadImageData(url: string, data: string): Promise<UploadedFile>
   getOutputImage(url: string, file: { filename: string; subfolder?: string; type?: string }): Promise<string>
   saveComfyOutputImage(url: string, file: { filename: string; subfolder?: string; type?: string }, outputDirectory: string): Promise<{ path: string; name: string }>
+  saveStillImage(url: string, file: { filename: string; subfolder?: string; type?: string }, outputDirectory: string): Promise<{ path: string; name: string }>
   getSettings(): Promise<AppSettings>
   getGpuTelemetry(): Promise<GpuTelemetry>
   saveSettings(settings: AppSettings): Promise<AppSettings>

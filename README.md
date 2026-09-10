@@ -9,14 +9,17 @@ A local-first Windows desktop interface for MiniMax H3 generation through ComfyU
 - A dedicated ACE‑Step 1.5 music workspace through ComfyUI, with XL SFT and XL Base checkpoint selection, lyric/instrumental modes, tempo/key/language controls, FLAC output, progress, cancellation, and in-app playback
 - A global Character Studio: Z-Image master references, MiniMax I2V turntable handoff, five-angle frame extraction, single-image or reference-set selection, and one-click Movie Creator imports
 - Mixed image, video, and audio references through the Ref2VA model
+- A complete H3 stack report that separately verifies FL2VA, Ref2VA, and the detected FL2V/Ref2V Turbo LoRAs
+- Automatic local vision-model descriptions for existing character, hair, wardrobe, accessory, and location reference images; authored fields are preserved
 - Non-destructive Ref2V video clipping: preview a longer source, set precise in/out points, and create or revise a focused 2–15 second reference MP4 without changing the original
 - Native synchronized video and stereo-audio decoding
 - Official ComfyUI H3 graph topology and sampling defaults, with detected FL2V and Ref2V 4/8-step turbo LoRAs, including MiniMax H3 Turbo Ref2VA 8-Step v1.0 at 768p
+- Two optional additional ComfyUI LoRA slots, each with an independent strength; official Turbo LoRAs remain automatic and do not consume a slot
 - Optional H3 text encoding: fast NVFP4-AWQ remains the default; select the slower, higher-quality `qwen3vl_32b_minimax_h3_int8_convrot.safetensors` encoder when it is installed
 - Local Ollama prompt enhancement, timed shot planning, and synchronized-audio rewriting
 - In-app playback through a range-aware local media proxy, using either ComfyUI history or the configured output directory
 - Z-Image Turbo first-frame generation using locally installed ComfyUI models
-- Landscape, portrait, and square output presets with automatic image fitting and an interactive crop preview
+- Landscape, portrait, and square output presets plus validated custom 32-pixel-aligned dimensions, automatic image fitting, and an interactive crop preview
 - Official `res_multistep` + `simple` sampling by default, an explicit full-quality experimental override, and WebSocket render progress/previews
 - Persistent generation defaults with Native Quality, official Turbo 8, Preview, and separately disclosed experimental sampling controls
 - Guided H3 Native Quality, Turbo 8, and Preview presets with resolution quality labels, validated official-stack reporting, and custom sampling isolated under an Experimental disclosure
@@ -58,7 +61,7 @@ pnpm build
 pnpm package:win
 ```
 
-The v0.12 installer is written to `release\MiniMax-Studio-Setup-0.12.0.exe`.
+For a packaged Windows build with an automatically incremented rolling build number, run `build.bat`. The patch component of the app version is the build number, and the installer is written to `release\MiniMax-Studio-Setup-<version>.exe`.
 - Independent model locations for diffusion models, text encoders, VAEs, LoRAs, preview VAEs, and vision encoders
 - ComfyUI connection health, GPU/VRAM display, job status, cancellation, history, and output playback
 - Responsive layouts for compact and large desktop windows

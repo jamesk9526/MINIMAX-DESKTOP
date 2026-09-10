@@ -57,6 +57,14 @@ export function buildMiniMaxWorkflow(
     prompt['5'] = { class_type: 'LoraLoaderModelOnly', inputs: { model: modelLink, lora_name: loraName, strength_model: options.loraStrength ?? 1 } }
     modelLink = ['5', 0]
   }
+  // User-selected adapters are intentionally loaded after the official Turbo
+  // adapter. This keeps Turbo automatic and allows up to two additional
+  // ComfyUI LoRAs without treating the Turbo file as a manual slot.
+  options.userLoras?.filter((lora) => lora.name.trim()).slice(0, 2).forEach((lora, index) => {
+    const id = `${90 + index}`
+    prompt[id] = { class_type: 'LoraLoaderModelOnly', inputs: { model: modelLink, lora_name: lora.name, strength_model: lora.strength } }
+    modelLink = [id, 0]
+  })
   // Ref2VA Turbo 8-step v1.0 was trained at 768p with 6 / 3 shifts. This is
   // part of that adapter's recipe, not a user tuning preference, so it wins
   // over a stale custom-shift setting whenever this exact LoRA is selected.
@@ -192,10 +200,21 @@ export function buildMiniMaxWorkflow(
   return prompt
 }
 
-export function extractOutputUrl(history: Record<string, unknown>, promptId: string, comfyUrl: string, mediaType: 'video' | 'audio' = 'video') {
+export function buildMiniMaxReferenceStillWorkflow(options: GenerationOptions, models: ModelSelection, uploads: { images: UploadedFile[]; videos: UploadedFile[]; audios: UploadedFile[] }): ComfyPrompt {
+  // Ref2VA requires a video-shaped latent, so keep its minimum valid frame
+  // batch in memory, select one decoded frame, and save only that image.
+  const prompt = buildMiniMaxWorkflow(options, models, uploads)
+  delete prompt['17']; delete prompt['18']; delete prompt['19']; delete prompt['72']
+  prompt['73'] = { class_type: 'SaveImage', inputs: { images: ['71', 0], filename_prefix: options.filenamePrefix } }
+  return prompt
+}
+
+export type ComfyOutputFile = { filename: string; subfolder?: string; type?: string }
+
+export function extractOutputFile(history: Record<string, unknown>, promptId: string, mediaType: 'video' | 'audio' | 'image' = 'video'): ComfyOutputFile | undefined {
   const entry = history[promptId] as { outputs?: Record<string, Record<string, unknown>> } | undefined
   if (!entry?.outputs) return undefined
-  const candidates: Array<{ filename: string; subfolder?: string; type?: string }> = []
+  const candidates: ComfyOutputFile[] = []
   const visit = (value: unknown) => {
     if (Array.isArray(value)) {
       value.forEach(visit)
@@ -212,11 +231,16 @@ export function extractOutputUrl(history: Record<string, unknown>, promptId: str
     }
     Object.values(object).forEach(visit)
   }
-  if (entry.outputs['84']) visit(entry.outputs['84'])
+  if (mediaType === 'image' && entry.outputs['73']) visit(entry.outputs['73'])
+  else if (entry.outputs['84']) visit(entry.outputs['84'])
   else if (entry.outputs['70']) visit(entry.outputs['70'])
   else visit(entry.outputs)
-  const expected = mediaType === 'audio' ? /\.(flac|wav|mp3|ogg|m4a|aac|opus)$/i : /\.(mp4|webm|mov|mkv|gif)$/i
-  const file = candidates.find((candidate) => expected.test(candidate.filename)) ?? candidates[0]
+  const expected = mediaType === 'audio' ? /\.(flac|wav|mp3|ogg|m4a|aac|opus)$/i : mediaType === 'image' ? /\.(png|jpe?g|webp)$/i : /\.(mp4|webm|mov|mkv|gif)$/i
+  return candidates.find((candidate) => expected.test(candidate.filename)) ?? candidates[0]
+}
+
+export function extractOutputUrl(history: Record<string, unknown>, promptId: string, comfyUrl: string, mediaType: 'video' | 'audio' | 'image' = 'video') {
+  const file = extractOutputFile(history, promptId, mediaType)
   if (file) {
     const query = new URLSearchParams({ filename: file.filename, subfolder: file.subfolder ?? '', type: file.type ?? 'output' })
     const upstream = `${comfyUrl.replace(/\/+$/, '')}/view?${query.toString()}`

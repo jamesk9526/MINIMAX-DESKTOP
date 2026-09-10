@@ -5,6 +5,7 @@ import { choices, type ObjectInfo } from '../lib/comfyInfo'
 import { buildZImage } from '../lib/zimage'
 import type { AccessoryProject, AppSettings, MediaFile } from '../types'
 import { ReferenceApprovalModal } from './ReferenceApprovalModal'
+import { analyzeReferenceImage } from '../lib/referenceAnalysis'
 
 export function AccessoryStudio({ settings, info, connected, onNotice }: { settings: AppSettings; info: ObjectInfo; connected: boolean; onNotice(tone: 'error' | 'success' | 'neutral', text: string): void }) {
   const initial = useMemo(() => { const saved = loadAccessoryProjects(); return saved.length ? saved : [newAccessoryProject()] }, [])
@@ -24,7 +25,7 @@ export function AccessoryStudio({ settings, info, connected, onNotice }: { setti
   const zEncoder = choices(info, 'CLIPLoader', 'clip_name').find((name) => /qwen[_-]?3[_-]?4b/i.test(name)) ?? 'qwen_3_4b.safetensors'
   const zVae = choices(info, 'VAELoader', 'vae_name').find((name) => /^ae\.safetensors$/i.test(name)) ?? 'ae.safetensors'
   const zReady = connected && choices(info, 'UNETLoader', 'unet_name').includes(zModel) && choices(info, 'CLIPLoader', 'clip_name').includes(zEncoder) && choices(info, 'VAELoader', 'vae_name').includes(zVae)
-  const chooseImage = async () => { const picked = await window.minimax.chooseMedia('image'); if (!picked) return; patch({ referenceImage: { ...picked, kind: 'image', preview: await window.minimax.mediaUrl(picked.path) } }) }
+  const chooseImage = async () => { const picked = await window.minimax.chooseMedia('image'); if (!picked) return; const projectId = active.id; patch({ referenceImage: { ...picked, kind: 'image', preview: await window.minimax.mediaUrl(picked.path) } }); onNotice('neutral', 'Image added. The local vision model is filling empty item fields…'); try { const result = await analyzeReferenceImage(settings, picked.path, 'accessory'); const current = loadAccessoryProjects().find((item) => item.id === projectId); if (!current) return; const category = current.category !== 'other' ? current.category : ['jewelry', 'eyewear', 'watch', 'bag', 'headwear', 'prop', 'other'].includes(result.category) ? result.category as AccessoryProject['category'] : current.category; patchById(projectId, { name: !current.name.trim() || /^Accessory \d+$/i.test(current.name) ? result.name || current.name : current.name, category, description: current.description.trim() ? current.description : result.description, colors: current.colors.trim() ? current.colors : result.colors, materials: current.materials.trim() ? current.materials : result.materials, visualStyle: current.visualStyle !== 'cinematic product photography' ? current.visualStyle : result.visualStyle || current.visualStyle }); onNotice('success', 'Existing image analyzed; empty item fields were filled for review.') } catch (reason) { onNotice('error', `The image was added, but automatic description failed: ${reason instanceof Error ? reason.message : String(reason)}`) } }
   const createReference = async () => {
     if (!zReady || busy || !active.name.trim()) return
     setBusy(true); setMessage('Submitting one isolated accessory reference…')

@@ -7,6 +7,7 @@ import type { AppSettings, GenerationJob, LocationProject, MediaFile } from '../
 import { ReferenceApprovalModal } from './ReferenceApprovalModal'
 import { RenderConstruction } from './RenderConstruction'
 import { resolveLlmConnection } from '../lib/llmProvider'
+import { analyzeReferenceImage } from '../lib/referenceAnalysis'
 
 function cleanSinglePrompt(value: string) {
   return value.replace(/\\\s*(?:\r?\n|$)/g, ' ').replace(/[*_#`]+/g, '').replace(/\s+/g, ' ').trim()
@@ -86,8 +87,19 @@ export function LocationStudio({ settings, info, connected, ollamaAvailable, aut
   const zReady = connected && choices(info, 'UNETLoader', 'unet_name').includes(zModel) && choices(info, 'CLIPLoader', 'clip_name').includes(zEncoder) && choices(info, 'VAELoader', 'vae_name').includes(zVae)
   const chooseImage = async (target: 'base' | 'reference' = 'reference') => {
     const picked = await window.minimax.chooseMedia('image'); if (!picked) return
+    const projectId = active.id
     const file: MediaFile = { ...picked, kind: 'image', preview: await window.minimax.mediaUrl(picked.path) }
     patch(target === 'base' ? { baseImage: file } : { referenceImages: [...active.referenceImages, file], selectedReferencePaths: active.selectedReferencePaths === undefined ? undefined : [...active.selectedReferencePaths, file.path] })
+    if (!ollamaAvailable) { onNotice('neutral', 'Image added. Connect a local vision model to fill the location profile automatically.'); return }
+    onNotice('neutral', 'Image added. The local vision model is filling empty location fields…')
+    try {
+      const result = await analyzeReferenceImage(settings, picked.path, 'location')
+      const current = loadLocationProjects().find((item) => item.id === projectId)
+      if (!current) return
+      const environmentMode = current.environmentMode !== 'mixed' ? current.environmentMode : ['mixed', 'nature', 'built'].includes(result.environmentMode) ? result.environmentMode as LocationProject['environmentMode'] : current.environmentMode
+      patchById(projectId, { name: !current.name.trim() || /^Location \d+$/i.test(current.name) ? result.name || current.name : current.name, environmentMode, description: current.description.trim() ? current.description : result.description, atmosphere: current.atmosphere.trim() ? current.atmosphere : result.atmosphere, timeOfDay: current.timeOfDay.trim() ? current.timeOfDay : result.timeOfDay, continuityAnchors: current.continuityAnchors.trim() ? current.continuityAnchors : result.continuityAnchors, visualStyle: current.visualStyle.trim() && current.visualStyle !== 'cinematic photorealism' ? current.visualStyle : result.visualStyle || current.visualStyle })
+      onNotice('success', 'Existing image analyzed; empty location fields were filled for review.')
+    } catch (reason) { onNotice('error', `The image was added, but automatic description failed: ${reason instanceof Error ? reason.message : String(reason)}`) }
   }
   const chooseWalkthrough = async () => { const picked = await window.minimax.chooseMedia('video'); if (!picked) return; patch({ walkthroughVideo: { ...picked, kind: 'video', preview: await window.minimax.mediaUrl(picked.path) } }); setVideoDuration(0) }
   const createMaster = async () => {

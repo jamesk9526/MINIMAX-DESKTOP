@@ -5,6 +5,7 @@ import { loadWardrobeProjects, newWardrobeProject, saveWardrobeProjects, wardrob
 import { buildZImage } from '../lib/zimage'
 import type { AppSettings, MediaFile, WardrobeProject } from '../types'
 import { ReferenceApprovalModal } from './ReferenceApprovalModal'
+import { analyzeReferenceImage } from '../lib/referenceAnalysis'
 
 export function WardrobeStudio({ settings, info, connected, onNotice }: { settings: AppSettings; info: ObjectInfo; connected: boolean; onNotice(tone: 'error' | 'success' | 'neutral', text: string): void }) {
   const initial = useMemo(() => { const saved = loadWardrobeProjects(); return saved.length ? saved : [newWardrobeProject()] }, [])
@@ -31,7 +32,7 @@ export function WardrobeStudio({ settings, info, connected, onNotice }: { settin
   const zEncoder = choices(info, 'CLIPLoader', 'clip_name').find((name) => /qwen[_-]?3[_-]?4b/i.test(name)) ?? 'qwen_3_4b.safetensors'
   const zVae = choices(info, 'VAELoader', 'vae_name').find((name) => /^ae\.safetensors$/i.test(name)) ?? 'ae.safetensors'
   const zReady = connected && choices(info, 'UNETLoader', 'unet_name').includes(zModel) && choices(info, 'CLIPLoader', 'clip_name').includes(zEncoder) && choices(info, 'VAELoader', 'vae_name').includes(zVae)
-  const chooseImage = async () => { const picked = await window.minimax.chooseMedia('image'); if (!picked) return; const file: MediaFile = { ...picked, kind: 'image', preview: await window.minimax.mediaUrl(picked.path) }; patch({ referenceImages: [...active.referenceImages, file], selectedReferencePaths: [...new Set([...(active.selectedReferencePaths ?? active.referenceImages.map((item) => item.path)), file.path])] }) }
+  const chooseImage = async () => { const picked = await window.minimax.chooseMedia('image'); if (!picked) return; const projectId = active.id; const file: MediaFile = { ...picked, kind: 'image', preview: await window.minimax.mediaUrl(picked.path) }; patch({ referenceImages: [...active.referenceImages, file], selectedReferencePaths: [...new Set([...(active.selectedReferencePaths ?? active.referenceImages.map((item) => item.path)), file.path])] }); onNotice('neutral', 'Image added. The local vision model is filling empty wardrobe fields…'); try { const result = await analyzeReferenceImage(settings, picked.path, 'wardrobe'); const current = loadWardrobeProjects().find((item) => item.id === projectId); if (!current) return; patchById(projectId, { name: !current.name.trim() || /^Wardrobe \d+$/i.test(current.name) ? result.name || current.name : current.name, description: current.description.trim() ? current.description : result.description, colors: current.colors.trim() ? current.colors : result.colors, materials: current.materials.trim() ? current.materials : result.materials, visualStyle: current.visualStyle.trim() && current.visualStyle !== 'cinematic photorealism' ? current.visualStyle : result.visualStyle || current.visualStyle }); onNotice('success', 'Existing image analyzed; empty wardrobe fields were filled for review.') } catch (reason) { onNotice('error', `The image was added, but automatic description failed: ${reason instanceof Error ? reason.message : String(reason)}`) } }
   const createReference = async () => {
     if (!zReady || busy || !renderPrompt.trim()) return
     setBusy(true); setError(false); setMessage('Submitting the three-view outfit sheet to Z-Image Turbo…')
