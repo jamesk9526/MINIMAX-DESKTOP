@@ -112,7 +112,13 @@ Either XL checkpoint is usable independently. ACE-Step additionally requires cur
 
 ### Z-Image stills (required for Image)
 
-Install the Z-Image checkpoint and compatible text encoder/VAE from the ComfyUI Z-Image workflow you use. MiniMax Studio discovers the installed Z-Image models from ComfyUI rather than copying them into its own folder. Use **Settings → Test connection** to confirm that the required Z-Image nodes are exposed.
+| ComfyUI folder | Turbo (fast) | Original (detail) |
+| --- | --- | --- |
+| `models/diffusion_models` | `z_image_turbo_bf16.safetensors` | `z_image_bf16.safetensors` |
+| `models/text_encoders` | `qwen_3_4b.safetensors` | `qwen_3_4b.safetensors` |
+| `models/vae` | `ae.safetensors` | `ae.safetensors` |
+
+Turbo is the fast 8-step option. Original Z-Image is the 40-step detail option. MiniMax Studio discovers installed models through ComfyUI rather than copying files into its own folder; **Settings → Test connection** confirms that the needed Z-Image nodes are exposed.
 
 ### Optional local AI and acceleration
 
