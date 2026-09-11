@@ -50,7 +50,7 @@ export function allocateCharacterReferences(characters: CharacterReferenceInput[
 export function allocateWorkspaceReferences(
   characters: CharacterReferenceInput[],
   wardrobes: WardrobeProject[],
-  locations: Array<{ id: string; name: string; images: MediaFile[]; environmentMode?: 'mixed' | 'nature' | 'built' }>,
+  locations: Array<{ id: string; name: string; images: MediaFile[]; environmentMode?: 'mixed' | 'nature' | 'built'; locationContext?: 'interior' | 'exterior' | 'mixed'; accuracyDetails?: string }>,
   limit = 9,
 ): MovieReferenceBinding[] {
   const accessories = loadAccessoryProjects()
@@ -62,7 +62,7 @@ export function allocateWorkspaceReferences(
     accessories: (character.accessoryIds ?? []).flatMap((accessoryId) => { const accessory = accessories.find((item) => item.id === accessoryId); return accessory?.referenceImage ? [{ file: accessory.referenceImage, purpose: 'accessory' as const, label: `Accessory: ${accessory.name} for ${character.name}`, characterId: character.id, accessoryId: accessory.id, source: 'accessory-studio' as const }] : [] }),
     details: detailBindings(character),
   }))
-  const locationQueues = locations.map((location) => location.images.map((file) => ({ file, purpose: 'location' as const, label: `Location: ${location.name}`, locationId: location.id, locationEnvironmentMode: location.environmentMode, source: 'location-studio' as const })))
+  const locationQueues = locations.map((location) => location.images.map((file) => ({ file, purpose: 'location' as const, label: `Location: ${location.name}`, locationId: location.id, locationEnvironmentMode: location.environmentMode, locationContext: location.locationContext, locationAccuracyDetails: location.accuracyDetails?.trim(), source: 'location-studio' as const })))
   const result: MovieReferenceBinding[] = []
   const take = (queue: MovieReferenceBinding[]) => { const next = queue.shift(); if (next && result.length < limit) result.push(next) }
 
@@ -153,9 +153,11 @@ export function composeReferenceInstructions(bindings: MovieReferenceBinding[]) 
   for (const group of locationGroups.values()) {
     const name = group[0].label.replace(/^Location:\s*/, '')
     const tags = group.map((item) => `<Picture ${item.number}>`).join(', ').replace(/, ([^,]+)$/, ' and $1')
-    lines.push(group[0].locationEnvironmentMode === 'nature'
+    const context = group[0].locationContext === 'interior' ? 'This is an interior location: keep the scene inside its approved rooms and preserve the room layout, connections, windows, doors, fixtures, and interior lighting.' : group[0].locationContext === 'exterior' ? 'This is an exterior location: keep the scene outside and preserve the façade, grounds, street or terrain relationships, exterior light, and sightlines.' : group[0].locationContext === 'mixed' ? 'This location may move between its approved interior and exterior areas only when the scene direction calls for it; preserve their real connections and transitions.' : ''
+    const accuracy = group[0].locationAccuracyDetails ? ` Must-match details: ${group[0].locationAccuracyDetails}.` : ''
+    lines.push((group[0].locationEnvironmentMode === 'nature'
       ? `${tags} depict the approved ${name} natural landscape. Preserve its terrain, landforms, ecology, vegetation, water features, rock formations, lighting, atmosphere, landmarks, and spatial geography. Nature only: do not add buildings, houses, cabins, sheds, ruins, roads, streets, bridges, fences, signs, vehicles, power lines, utility poles, constructed paths, furniture, or any other human-made structures or objects.`
-      : `${tags} depict the approved ${name} location. Preserve its architecture, layout, materials, lighting, landmarks, atmosphere, and spatial geography.`)
+      : `${tags} depict the approved ${name} location. Preserve its architecture, layout, materials, lighting, landmarks, atmosphere, and spatial geography.`) + ` ${context}${accuracy}`)
   }
   for (const binding of numbered.filter((item) => item.purpose === 'continuity')) lines.push(`Continue the framing, lighting, pose, screen direction, and motion state shown in <Picture ${binding.number}>.`)
   for (const binding of numbered.filter((item) => item.purpose === 'generic')) lines.push(`Use <Picture ${binding.number}> as ${binding.label.replace(/^Shot reference:\s*/, 'the visual reference for ')}.`)

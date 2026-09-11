@@ -156,6 +156,7 @@ export function ClipEditor({ settings, jobs, onUseFrame, onNotice }: {
       <button className="secondary-button" onClick={() => void chooseLocal()}><FolderOpen size={15} />Import media</button>
     </div>
 
+
     <div className="editor-workbench">
       <aside className="media-bin" aria-label="Project media bin">
         <div className="editor-pane-heading"><div><strong>Media bin</strong><span>{project.media.length + completed.length} available clips</span></div><button onClick={() => void chooseLocal()} aria-label="Import video"><Plus size={15} /></button></div>

@@ -71,7 +71,7 @@ export function useLivePreview(url: string | undefined, enabled: boolean, onProg
       socket.onclose = () => { setConnected(false); if (!stopped) timer = setTimeout(connect, 3000) }
       socket.onmessage = async (event) => {
         if (typeof event.data === 'string') {
-          let msg: { type: string; data: { prompt_id?: string; node?: string | null; value?: number; max?: number; image?: string; mime?: string; fps?: number; step?: number; total?: number; output?: { images?: Array<{ filename: string; subfolder?: string; type?: string }> } } }
+          let msg: { type: string; data: { prompt_id?: string; node?: string | null; value?: number; max?: number; image?: string; mime?: string; fps?: number; rate?: number; step?: number; total?: number; output?: { images?: Array<{ filename: string; subfolder?: string; type?: string }> } } }
           try { msg = JSON.parse(event.data) } catch { return }
           const promptId = msg.data.prompt_id ?? active
           if (msg.type === 'execution_start') {
@@ -83,6 +83,10 @@ export function useLivePreview(url: string | undefined, enabled: boolean, onProg
           }
           if (msg.type === 'execution_cached') onProgress(promptId, { label: 'Reusing cached model data' })
           if (msg.type === 'executing' && msg.data.node) onProgress(promptId, { label: nodeStageLabel(msg.data.node) })
+          // KJNodes announces its LTX outer-sampler stream before it begins
+          // sending binary PREVIEW_IMAGE frames. Surface that separately from
+          // generic socket connectivity so a missing frame stream is obvious.
+          if (msg.type === 'VHS_latentpreview') onProgress(promptId, { label: `LTX sampling preview stream · ${msg.data.fps ?? msg.data.rate ?? 24} fps` })
           if (msg.type === 'progress' && msg.data.max) {
             const currentStep = Math.max(0, msg.data.value ?? 0)
             const totalSteps = msg.data.max

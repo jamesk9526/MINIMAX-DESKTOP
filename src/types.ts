@@ -9,7 +9,7 @@ export type AppliedLora = { name: string; strength: number }
 export type ReferencePurpose = 'character' | 'character-angle' | 'detail' | 'hair' | 'wardrobe' | 'accessory' | 'location' | 'continuity' | 'product' | 'style' | 'generic'
 export type PromptPresetCategory = 'camera' | 'shot' | 'angle' | 'lens' | 'lighting' | 'audio' | 'style' | 'movement' | 'transition' | 'character' | 'wardrobe' | 'location'
 export type PromptPreset = { id: string; category: PromptPresetCategory; label: string; keywords: string[]; description: string; insertion: string }
-export type MovieReferenceBinding = { file: MediaFile; purpose: ReferencePurpose; label: string; detailNotes?: string; characterId?: string; hairStyleId?: string; wardrobeId?: string; accessoryId?: string; locationId?: string; locationEnvironmentMode?: LocationProject['environmentMode']; source: 'character-studio' | 'hair-studio' | 'wardrobe-studio' | 'accessory-studio' | 'location-studio' | 'movie' | 'shot' | 'continuity' }
+export type MovieReferenceBinding = { file: MediaFile; purpose: ReferencePurpose; label: string; detailNotes?: string; characterId?: string; hairStyleId?: string; wardrobeId?: string; accessoryId?: string; locationId?: string; locationEnvironmentMode?: LocationProject['environmentMode']; locationContext?: LocationProject['locationContext']; locationAccuracyDetails?: string; source: 'character-studio' | 'hair-studio' | 'wardrobe-studio' | 'accessory-studio' | 'location-studio' | 'movie' | 'shot' | 'continuity' }
 export type ResolvedMovieShot = { preferredMode: GenerationMode; effectiveMode: GenerationMode; references: MovieReferenceBinding[]; compiledPrompt: string; routeReason: string; omittedReferences: MovieReferenceBinding[] }
 
 export type GenerationDefaults = {
@@ -46,7 +46,9 @@ export type AppSettings = {
   ffmpegPath: string
   uiScale: number
   attentionBackend: AttentionBackendPreference
+  h3ParallelAttentionEnabled: boolean
   experimentalLtxMsrEnabled: boolean
+  blurNsfwLivePreviews: boolean
   queueDelaySeconds: number
   characterDetailReferencesEnabled: boolean
   renderSettingsPresets: RenderSettingsPreset[]
@@ -87,10 +89,12 @@ export type LocationProject = {
   id: string
   name: string
   environmentMode: 'mixed' | 'nature' | 'built'
+  locationContext: 'interior' | 'exterior' | 'mixed'
   description: string
   atmosphere: string
   timeOfDay: string
   continuityAnchors: string
+  accuracyDetails: string
   visualStyle: string
   referencePrompt: string
   createdAt: number
@@ -195,6 +199,7 @@ export type Ltx25GenerationOptions = {
   preset: 'quality' | 'turbo'
   previewOverride?: { nodeType: string; fps: number }
   attentionBackend?: string
+  h3ParallelAttention?: { nodeType: string; devices: 'auto' | number }
   msr?: { loraName: string; references: string[] }
   filenamePrefix: string
 }
@@ -234,6 +239,7 @@ export type GenerationOptions = {
   turbo: 'off' | '4' | '8'
   experimentalSampling?: boolean
   attentionBackend?: string
+  h3ParallelAttention?: { nodeType: string; devices: 'auto' | number }
   previewOverride?: { frames: number; fps: number; nodeType?: string; vaeName?: string; jpegQuality?: number }
   loraStrength?: number
   userLoras?: AppliedLora[]
@@ -373,6 +379,9 @@ export type DesktopApi = {
   extractVideoFrames(source: string, positions: number[], outputDirectory: string, ffmpegPath: string): Promise<Array<{ path: string; name: string }>>
   trimVideo(source: string, start: number, end: number, outputDirectory: string, ffmpegPath: string): Promise<{ path: string; name: string }>
   joinVideos(clips: Array<Pick<ClipItem, 'source' | 'start' | 'end'>>, outputDirectory: string, ffmpegPath: string): Promise<{ path: string; url: string }>
+  getRifeStatus(): Promise<{ installed: boolean; executable?: string; error?: string }>
+  installRife(): Promise<{ installed: boolean; executable?: string; error?: string }>
+  interpolateVideo(source: string, outputDirectory: string, ffmpegPath: string, mode: 'fps-2x' | 'slow-motion'): Promise<{ path: string; url: string }>
   showOutput(path: string): Promise<void>
   findLatestOutput(outputDirectory: string, since: number, kind?: 'video' | 'audio'): Promise<string | null>
   listOllamaModels(url: string, provider?: AppSettings['llmProvider']): Promise<OllamaModel[]>

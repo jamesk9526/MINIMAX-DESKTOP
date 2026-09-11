@@ -73,16 +73,19 @@ export function buildMiniMaxWorkflow(
     prompt['85'] = { class_type: 'ModelAttentionBackend', inputs: { model: modelLink, attention: options.attentionBackend } }
     modelLink = ['85', 0]
   }
-  // Ref2VA Turbo 8-step v1.0 was trained at 768p with 6 / 3 shifts. This is
-  // part of that adapter's recipe, not a user tuning preference, so it wins
-  // over a stale custom-shift setting whenever this exact LoRA is selected.
-  const ref2vaTurbo8TrainingShifts = options.mode === 'reference' && options.turbo === '8'
-    && /^minimax_h3_ref2v_turbo_8step_v1\.0_768p_comfyui_bf16\.safetensors$/i.test(models.ref2vLora)
-  const sigmaShift = ref2vaTurbo8TrainingShifts ? { video: 6, audio: 3 } : options.sigmaShift
-  if (sigmaShift) {
+  // The optional H3 Parallel node shards Kitchen INT8 attention heads across
+  // peer-accessible GPUs in this one ComfyUI process. The node itself validates
+  // peer access and fails early; it is never emitted unless the app detected it.
+  if (options.h3ParallelAttention) {
+    prompt['86'] = { class_type: options.h3ParallelAttention.nodeType, inputs: { model: modelLink, devices: options.h3ParallelAttention.devices, min_sequence_length: 32768 } }
+    modelLink = ['86', 0]
+  }
+  // Sigma shifts are an explicit user choice. Turbo recipes can recommend a
+  // starting point, but must not silently replace custom video/audio values.
+  if (options.sigmaShift) {
     prompt['6'] = {
       class_type: 'MiniMaxH3SigmaShift',
-      inputs: { model: modelLink, shift_video: sigmaShift.video, shift_audio: sigmaShift.audio },
+      inputs: { model: modelLink, shift_video: options.sigmaShift.video, shift_audio: options.sigmaShift.audio },
     }
     modelLink = ['6', 0]
   }

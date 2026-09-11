@@ -44,7 +44,9 @@ type AppSettings = {
   ffmpegPath: string
   uiScale: number
   attentionBackend: 'automatic' | 'kitchen' | 'sage' | 'native'
+  h3ParallelAttentionEnabled: boolean
   experimentalLtxMsrEnabled: boolean
+  blurNsfwLivePreviews: boolean
   queueDelaySeconds: number
   characterDetailReferencesEnabled: boolean
   renderSettingsPresets: RenderSettingsPreset[]
@@ -155,7 +157,9 @@ function defaultSettings(): AppSettings {
     ffmpegPath: existsSync('C:\\FFMPEG\\bin\\ffmpeg.exe') ? 'C:\\FFMPEG\\bin\\ffmpeg.exe' : 'ffmpeg',
     uiScale: 100,
     attentionBackend: 'automatic',
+    h3ParallelAttentionEnabled: false,
     experimentalLtxMsrEnabled: false,
+    blurNsfwLivePreviews: false,
     queueDelaySeconds: 0,
     characterDetailReferencesEnabled: false,
     renderSettingsPresets: [],
@@ -206,7 +210,7 @@ async function generateWithLlm(url: string, model: string, prompt: string, provi
     if (!answer) throw new Error(typeof data.error === 'string' ? data.error : data.error?.message || 'LM Studio returned an empty response.')
     return answer
   }
-  const data = await comfyFetch(url, '/api/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model, prompt, stream: false, think: false, options: { temperature: 0.65, num_predict: 1200 } }) }) as { response?: string; error?: string }
+  const data = await comfyFetch(url, '/api/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model, prompt, stream: false, keep_alive: 0, think: false, options: { temperature: 0.65, num_predict: 1200 } }) }) as { response?: string; error?: string }
   const answer = data.response ? finalOllamaAnswer(data.response) : ''
   if (!answer) throw new Error(data.error || 'Ollama returned an empty response.')
   return answer
@@ -246,7 +250,7 @@ async function loadSettings(): Promise<AppSettings> {
     const uiScale = Math.max(75, Math.min(150, Number(raw.uiScale) || defaults.uiScale))
     const renderSettingsPresets = Array.isArray(raw.renderSettingsPresets) ? raw.renderSettingsPresets.filter((preset) => preset && typeof preset.name === 'string' && preset.name.trim()).slice(0, 30).map((preset) => ({ id: typeof preset.id === 'string' ? preset.id : randomUUID(), name: preset.name.trim().slice(0, 60), values: { ...generationDefaults, ...(preset.values ?? {}) }, createdAt: Number(preset.createdAt) || Date.now(), updatedAt: Number(preset.updatedAt) || Date.now() })) : []
     const attentionBackend = raw.attentionBackend === 'kitchen' || raw.attentionBackend === 'sage' || raw.attentionBackend === 'native' ? raw.attentionBackend : 'automatic'
-    return { ...defaults, ...raw, uiScale, attentionBackend, queueDelaySeconds: Math.max(0, Math.min(600, Number(raw.queueDelaySeconds) || 0)), experimentalLtxMsrEnabled: raw.experimentalLtxMsrEnabled === true, llmProvider: raw.llmProvider === 'lmstudio' ? 'lmstudio' : 'ollama', characterDetailReferencesEnabled: raw.characterDetailReferencesEnabled === true, renderSettingsPresets, paths: { ...defaults.paths, ...raw.paths }, generationDefaults }
+    return { ...defaults, ...raw, uiScale, attentionBackend, h3ParallelAttentionEnabled: raw.h3ParallelAttentionEnabled === true, queueDelaySeconds: Math.max(0, Math.min(600, Number(raw.queueDelaySeconds) || 0)), experimentalLtxMsrEnabled: raw.experimentalLtxMsrEnabled === true, blurNsfwLivePreviews: raw.blurNsfwLivePreviews === true, llmProvider: raw.llmProvider === 'lmstudio' ? 'lmstudio' : 'ollama', characterDetailReferencesEnabled: raw.characterDetailReferencesEnabled === true, renderSettingsPresets, paths: { ...defaults.paths, ...raw.paths }, generationDefaults }
   } catch {
     return defaultSettings()
   }
@@ -551,6 +555,30 @@ function runFfmpeg(executable: string, args: string[]) {
   })
 }
 
+function runTool(executable: string, args: string[], label: string) {
+  return new Promise<void>((resolve, reject) => {
+    const child = spawn(executable, args, { windowsHide: true })
+    let errorText = ''
+    child.stderr.on('data', (chunk) => { errorText = `${errorText}${chunk}`.slice(-8000) })
+    child.once('error', (error) => reject(new Error(`Could not start ${label}: ${error.message}`)))
+    child.once('close', (code) => code === 0 ? resolve() : reject(new Error(`${label} failed (${code}). ${errorText.split('\n').slice(-5).join(' ')}`)))
+  })
+}
+
+const RIFE_RELEASE_URL = 'https://github.com/nihui/rife-ncnn-vulkan/releases/download/20221029/rife-ncnn-vulkan-20221029-windows.zip'
+function rifeDirectory() { return join(app.getPath('userData'), 'tools', 'rife-ncnn-vulkan') }
+async function findRifeExecutable(root = rifeDirectory()): Promise<string | null> {
+  try {
+    const entries = await readdir(root, { withFileTypes: true })
+    for (const entry of entries) {
+      const candidate = join(root, entry.name)
+      if (entry.isFile() && entry.name.toLowerCase() === 'rife-ncnn-vulkan.exe') return candidate
+      if (entry.isDirectory()) { const nested = await findRifeExecutable(candidate); if (nested) return nested }
+    }
+  } catch { /* Not installed yet. */ }
+  return null
+}
+
 async function resolveVideoSource(source: string) {
   if (!source.startsWith('minimax-media:')) {
     if (!existsSync(source) || !mediaExtensions.has(extname(source).toLowerCase())) throw new Error('The selected video file is unavailable.')
@@ -833,7 +861,7 @@ app.whenReady().then(async () => {
     if (provider === 'lmstudio') assertLocalLmStudioUrl(url)
     const data = provider === 'lmstudio'
       ? await comfyFetch(url, lmStudioPath(url, '/chat/completions'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }, ...images.map((image) => ({ type: 'image_url', image_url: { url: `data:${image.mime};base64,${image.base64}` } }))] }], stream: false, temperature: 0.45, max_tokens: 1800 }) }) as { choices?: Array<{ message?: { content?: string } }>; error?: { message?: string } | string }
-      : await comfyFetch(url, '/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model, messages: [{ role: 'user', content: prompt, images: images.map((image) => image.base64) }], stream: false, think: false, options: { temperature: 0.45, num_predict: 1800 } }) }) as { message?: { content?: string }; error?: string }
+      : await comfyFetch(url, '/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model, messages: [{ role: 'user', content: prompt, images: images.map((image) => image.base64) }], stream: false, keep_alive: 0, think: false, options: { temperature: 0.45, num_predict: 1800 } }) }) as { message?: { content?: string }; error?: string }
     const answer = provider === 'lmstudio' ? finalOllamaAnswer(('choices' in data ? data.choices?.[0]?.message?.content : '') ?? '') : finalOllamaAnswer(('message' in data ? data.message?.content : '') ?? '')
     const error = 'error' in data ? data.error : undefined
     if (!answer) throw new Error(typeof error === 'string' ? error : error?.message || `${provider === 'lmstudio' ? 'LM Studio' : 'Ollama'} could not inspect the supplied reference images. Choose a local vision-capable model in Settings.`)
@@ -848,6 +876,7 @@ app.whenReady().then(async () => {
         model,
         messages: [{ role: 'user', content: prompt }],
         stream: false,
+        keep_alive: 0,
         think: false,
         format: schema,
         options: { temperature: 0.2, num_predict: 6000 },
@@ -936,6 +965,46 @@ app.whenReady().then(async () => {
     await writeFile(listPath, list, 'utf8')
     const output = join(directory, `MiniMax_Joined_${Date.now()}.mp4`)
     await runFfmpeg(ffmpegPath, ['-y', '-f', 'concat', '-safe', '0', '-i', listPath, '-map', '0', '-c', 'copy', '-movflags', '+faststart', output])
+    return { path: output, url: `minimax-media://local?path=${encodeURIComponent(output)}` }
+  })
+  ipcMain.handle('rife:status', async () => {
+    const executable = await findRifeExecutable()
+    return { installed: Boolean(executable), executable: executable ?? undefined }
+  })
+  ipcMain.handle('rife:install', async () => {
+    try {
+      const root = rifeDirectory()
+      await mkdir(root, { recursive: true })
+      const archive = join(root, 'rife-ncnn-vulkan-windows.zip')
+      const response = await fetch(RIFE_RELEASE_URL)
+      if (!response.ok) throw new Error(`Official RIFE download failed (${response.status}).`)
+      await writeFile(archive, Buffer.from(await response.arrayBuffer()))
+      await runTool('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `Expand-Archive -LiteralPath '${archive.replace(/'/g, "''")}' -DestinationPath '${root.replace(/'/g, "''")}' -Force`], 'RIFE setup')
+      const executable = await findRifeExecutable()
+      if (!executable) throw new Error('RIFE was extracted but its Windows executable was not found.')
+      return { installed: true, executable }
+    } catch (error) { return { installed: false, error: error instanceof Error ? error.message : String(error) } }
+  })
+  ipcMain.handle('rife:interpolate', async (_event, source: string, outputDirectory: string, ffmpegPath: string, mode: 'fps-2x' | 'slow-motion') => {
+    const executable = await findRifeExecutable()
+    if (!executable) throw new Error('RIFE is not installed. Install it from the Clip Editor first.')
+    const input = await resolveVideoSource(source)
+    const id = String(Date.now())
+    const working = join(outputDirectory, 'MiniMax Studio RIFE', id)
+    const frames = join(working, 'frames')
+    const interpolated = join(working, 'interpolated')
+    await mkdir(frames, { recursive: true }); await mkdir(interpolated, { recursive: true })
+    await runFfmpeg(ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-i', input, '-vf', 'fps=24', '-vsync', '0', '-start_number', '0', '-y', join(frames, '%08d.png')])
+    const frameCount = (await readdir(frames)).filter((file) => /\.png$/i.test(file)).length
+    if (frameCount < 2) throw new Error('RIFE needs a clip with at least two decoded frames.')
+    await runTool(executable, ['-i', frames, '-o', interpolated, '-n', String(frameCount * 2 - 1), '-m', join(dirname(executable), 'models', 'rife-v4.6')], 'RIFE optical-flow interpolation')
+    const outputRoot = join(outputDirectory, 'MiniMax Studio RIFE')
+    await mkdir(outputRoot, { recursive: true })
+    const output = join(outputRoot, `RIFE_${mode === 'slow-motion' ? 'Cinematic_Slow_Motion' : '48fps'}_${id}.mp4`)
+    const outputFps = mode === 'slow-motion' ? '24' : '48'
+    await runFfmpeg(ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-framerate', outputFps, '-start_number', '0', '-i', join(interpolated, '%08d.png'), '-map', '0:v:0', '-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-an', '-y', output])
+    const created = await stat(output).catch(() => null)
+    if (!created?.size) throw new Error('RIFE completed without producing a video.')
     return { path: output, url: `minimax-media://local?path=${encodeURIComponent(output)}` }
   })
   ipcMain.handle('shell:show-output', async (_event, outputPath: string) => {
