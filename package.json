@@ -1,9 +1,12 @@
 {
   "name": "minimax-desktop",
-  "version": "0.12.24",
+  "version": "0.12.25",
   "private": true,
   "description": "Local-first MiniMax H3 desktop studio powered by ComfyUI",
-  "author": "James",
+  "author": {
+    "name": "James Knox",
+    "email": "contact@jamesnox.com"
+  },
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "concurrently -k \"pnpm dev:web\" \"pnpm dev:electron\"",
@@ -17,7 +20,7 @@
     "smoke:lan": "node scripts/smoke-lan.cjs",
     "start": "node scripts/launch-electron.cjs",
     "package:win": "pnpm build && electron-builder --win nsis --x64 --config.npmRebuild=false",
-    "package:linux": "pnpm build && electron-builder --linux zip deb --x64 --config.npmRebuild=false",
+    "package:linux": "pnpm build && electron-builder --linux zip --x64 --config.npmRebuild=false",
     "package:linux:deb": "pnpm build && electron-builder --linux deb --x64 --config.npmRebuild=false",
     "package:linux:appimage": "pnpm build && electron-builder --linux AppImage --x64 --config.npmRebuild=false",
     "package:linux:tar": "pnpm build && electron-builder --linux tar.gz --x64 --config.npmRebuild=false",
@@ -115,6 +118,7 @@
         }
       ],
       "category": "Graphics",
+      "maintainer": "James Knox <contact@jamesnox.com>",
       "synopsis": "Local-first AI filmmaking workstation",
       "description": "MiniMax Studio is a local-first AI filmmaking workstation powered by ComfyUI.",
       "artifactName": "MiniMax-Studio-${version}-linux-${arch}.${ext}"

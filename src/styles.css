@@ -3403,14 +3403,38 @@ select option { background: #0b1a2c; color: #eef7ff; }
 
 /* Final desktop chrome guard: this comes after workspace-specific rules so a
    live render can never collapse the engine status beneath native window chrome. */
-.titlebar { overflow: hidden; }
+.titlebar {
+  gap: 8px;
+  padding: 0 148px 0 16px;
+  overflow: hidden;
+  background: linear-gradient(90deg, #071524 0%, #091a2d 56%, #0a1a2c 100%);
+  box-shadow: inset 0 -1px 0 rgba(112, 188, 255, .08);
+}
 .titlebar .titlebar-drag { min-width: 0; }
 .titlebar .titlebar-runtime,
 .titlebar .titlebar-sampler,
 .titlebar .gpu-meter,
 .titlebar .titlebar-projects { min-width: 0; }
 .titlebar .titlebar-runtime { overflow: hidden; text-overflow: ellipsis; }
-.titlebar .connection-chip { flex: 0 0 auto; min-width: 102px; max-width: 150px; overflow: hidden; white-space: nowrap; }
+.titlebar .connection-chip {
+  display: inline-flex;
+  flex: 0 0 auto;
+  min-width: 136px;
+  max-width: 172px;
+  min-height: 32px;
+  padding-inline: 11px;
+  overflow: hidden;
+  border-color: #244766;
+  background: linear-gradient(180deg, rgba(18, 43, 68, .95), rgba(9, 27, 45, .95));
+  color: #c6d9eb;
+  font-weight: 600;
+  letter-spacing: .01em;
+  white-space: nowrap;
+}
+.titlebar .connection-chip:hover { border-color: #5ba9e4; background: #12314f; color: #eff8ff; }
+.titlebar .connection-chip .status-dot { flex: 0 0 auto; box-shadow: 0 0 0 3px rgba(103, 187, 255, .13); }
+.titlebar .connection-chip.online { border-color: rgba(90, 203, 171, .42); background: linear-gradient(180deg, rgba(25, 80, 82, .65), rgba(9, 36, 49, .88)); }
+.titlebar .connection-chip.online .status-dot { background: #63dfbc; box-shadow: 0 0 0 3px rgba(99, 223, 188, .13); }
 @media (max-width: 1360px) {
   /* The centered reset control becomes a normal item before the titlebar has
      enough room for live telemetry, project scope, and engine status. */
@@ -3433,6 +3457,9 @@ select option { background: #0b1a2c; color: #eef7ff; }
   .titlebar .titlebar-projects span { max-width: 138px; }
 }
 @media (min-width: 1701px) {
+  /* Leave headroom for transient render telemetry instead of letting the
+     search field consume the space reserved for the native title controls. */
+  .titlebar .titlebar-search { width: clamp(300px, 24vw, 390px); }
   .titlebar .titlebar-runtime { max-width: 118px; }
   .titlebar .titlebar-sampler { max-width: 156px; }
   .titlebar .titlebar-sampler > span:not(:first-of-type), .titlebar .titlebar-sampler .sampler-step-rate { display: none; }
