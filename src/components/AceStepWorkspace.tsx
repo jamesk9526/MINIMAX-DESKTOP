@@ -75,7 +75,7 @@ export function AceStepWorkspace({ settings, models, connected, pipelineReady, m
 
   return <div className="create-page ace-workspace">
     <div className="page-heading">
-      <div><p className="eyebrow">COMFYUI MUSIC WORKSPACE</p><h1>Music with ACE‑Step 1.5</h1><p>Generate complete songs and instrumentals locally with the official ACE-Step audio pipeline.</p></div>
+      <div><p className="eyebrow">CREATE · ACE‑STEP 1.5</p><h1>Music Creation</h1><p>Shape complete songs and instrumentals with direction, lyrics, and focused audio controls.</p></div>
       <div className="heading-state"><span className={modelReady ? 'ok' : 'warn'}>{modelReady ? <Check size={15} /> : <AlertCircle size={15} />}{modelReady ? `${state.model.toUpperCase()} pipeline ready` : missingNodes.length ? 'Update ComfyUI' : 'ACE-Step models missing'}</span></div>
     </div>
     <div className="workspace-grid ace-workspace-grid">

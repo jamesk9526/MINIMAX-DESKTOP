@@ -1,6 +1,6 @@
 {
   "name": "minimax-desktop",
-  "version": "0.12.23",
+  "version": "0.12.24",
   "private": true,
   "description": "Local-first MiniMax H3 desktop studio powered by ComfyUI",
   "author": "James",
@@ -16,7 +16,12 @@
     "lint": "eslint . --max-warnings 0",
     "smoke:lan": "node scripts/smoke-lan.cjs",
     "start": "node scripts/launch-electron.cjs",
-    "package:win": "pnpm build && electron-builder --win nsis --x64 --config.npmRebuild=false"
+    "package:win": "pnpm build && electron-builder --win nsis --x64 --config.npmRebuild=false",
+    "package:linux": "pnpm build && electron-builder --linux zip deb --x64 --config.npmRebuild=false",
+    "package:linux:deb": "pnpm build && electron-builder --linux deb --x64 --config.npmRebuild=false",
+    "package:linux:appimage": "pnpm build && electron-builder --linux AppImage --x64 --config.npmRebuild=false",
+    "package:linux:tar": "pnpm build && electron-builder --linux tar.gz --x64 --config.npmRebuild=false",
+    "package:mac": "pnpm build && electron-builder --mac zip --x64 --arm64 --config.npmRebuild=false"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",
@@ -87,6 +92,45 @@
       "createStartMenuShortcut": true,
       "shortcutName": "MiniMax Studio",
       "deleteAppDataOnUninstall": false
+    },
+    "linux": {
+      "target": [
+        {
+          "target": "zip",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "category": "Graphics",
+      "synopsis": "Local-first AI filmmaking workstation",
+      "description": "MiniMax Studio is a local-first AI filmmaking workstation powered by ComfyUI.",
+      "artifactName": "MiniMax-Studio-${version}-linux-${arch}.${ext}"
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "zip",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "category": "public.app-category.graphics-design",
+      "artifactName": "MiniMax-Studio-${version}-mac-${arch}.${ext}"
     }
   }
 }

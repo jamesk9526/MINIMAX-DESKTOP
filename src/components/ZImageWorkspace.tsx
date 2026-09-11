@@ -178,7 +178,7 @@ export function ZImageWorkspace({
 
   return <div className="standard-page zimage-workspace">
     <div className="page-heading">
-      <div><p className="eyebrow">LOCAL IMAGE WORKSPACE</p><h1>Create Image</h1><p>Choose fast Z-Image Turbo or the original full-capacity model for detailed production stills.</p></div>
+      <div><p className="eyebrow">CREATE · Z‑IMAGE</p><h1>Image Creation</h1><p>Design production-ready stills and opening frames with focused image controls.</p></div>
       <div className="heading-state"><span className={connected && available ? 'ok' : 'warn'}>{connected && available ? <Check size={15} /> : <AlertCircle size={15} />}{connected ? available ? variant === 'turbo' ? 'Turbo ready' : 'Original ready' : `${variant === 'turbo' ? 'Turbo' : 'Original'} model needed` : 'Engine offline'}</span></div>
     </div>
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type Ref } from 'react'
 import QRCode from 'qrcode'
 import { createId } from './lib/createId'
 import {
@@ -27,6 +27,7 @@ import {
   ListVideo,
   LoaderCircle,
   MapPin,
+  Maximize2,
   Menu,
   MessageSquareText,
   Minus,
@@ -39,6 +40,7 @@ import {
   RefreshCw,
   RotateCcw,
   Save,
+  Search,
   Scissors,
   Settings,
   Shirt,
@@ -609,7 +611,7 @@ function App() {
   const [projectManagerOpen, setProjectManagerOpen] = useState(false)
   const [workspaceProjects, setWorkspaceProjects] = useState<WorkspaceProject[]>(loadWorkspaceProjects)
   const [lanStatus, setLanStatus] = useState<LanStatus>({ running: false })
-  const [lanQr, setLanQr] = useState('')
+  const [lanQr, setLanQr] = useState<{ mobile: string; desktop: string }>({ mobile: '', desktop: '' })
   const [videoClipDraft, setVideoClipDraft] = useState<{ source: MediaFile; replaceIndex?: number } | null>(null)
   const [createResetKey, setCreateResetKey] = useState(0)
   const [ltxResetKey, setLtxResetKey] = useState(0)
@@ -751,11 +753,15 @@ function App() {
 
   useEffect(() => {
     if (!lanOpen || !lanStatus.url) {
-      setLanQr('')
+      setLanQr({ mobile: '', desktop: '' })
       return
     }
-    void QRCode.toDataURL(lanStatus.url, { width: 300, margin: 2, color: { dark: '#101412', light: '#ffffff' } }).then(setLanQr)
-  }, [lanOpen, lanStatus.url])
+    const desktopUrl = lanStatus.desktopUrl ?? lanStatus.url.replace('?mobile=1', '?desktop=1')
+    void Promise.all([
+      QRCode.toDataURL(lanStatus.url, { width: 300, margin: 2, color: { dark: '#07111f', light: '#ffffff' } }),
+      QRCode.toDataURL(desktopUrl, { width: 300, margin: 2, color: { dark: '#07111f', light: '#ffffff' } }),
+    ]).then(([mobile, desktop]) => setLanQr({ mobile, desktop })).catch(() => setLanQr({ mobile: '', desktop: '' }))
+  }, [lanOpen, lanStatus.url, lanStatus.desktopUrl])
 
   useEffect(() => {
     if (!lanOpen) return
@@ -1321,7 +1327,7 @@ function App() {
     return { ...picked, kind: 'image', preview: await window.minimax.fileDataUrl(picked.path) }
   }
 
-  const useStartFrameInLtx = (file: MediaFile, identityPrompt?: string, msrReferences: MediaFile[] = []) => {
+  const loadStartFrameInLtx = (file: MediaFile, identityPrompt?: string, msrReferences: MediaFile[] = []) => {
     let workspace: Record<string, unknown> = {}
     try { workspace = JSON.parse(localStorage.getItem('ltx25.workspace') ?? '{}') as Record<string, unknown> } catch { /* Replace malformed legacy workspace data. */ }
     const storedFrame = { ...file }
@@ -1344,7 +1350,7 @@ function App() {
       try {
         const description = await window.minimax.generateWithOllamaVision(llm.url, llm.model, 'Inspect this generated still and return one concise visible-reference grounding paragraph for an image-to-video prompt. Describe only stable visible details: number of people or subjects, non-sensitive facial geometry and expression, hairstyle, clothing and accessories, body pose, environment, objects, composition, lighting, and color treatment. Do not identify people, infer ethnicity, age, health, personality, or hidden details. Do not describe motion, sound, camera instructions, quality advice, or any text that is not visibly present. Return plain text only, under 110 words.', [file.path], llm.provider)
         handoffPrompt = appendLtxVisionGrounding(handoffPrompt, description)
-        useStartFrameInLtx(file, handoffPrompt, msrReferences)
+        loadStartFrameInLtx(file, handoffPrompt, msrReferences)
         setNotice({ tone: 'success', text: `${file.name} loaded into LTX 2.5 with identity protection and local visual grounding.` })
         return
       } catch {
@@ -1352,7 +1358,7 @@ function App() {
         // with the deterministic image-authority prompt when inspection fails.
       }
     }
-    useStartFrameInLtx(file, handoffPrompt, msrReferences)
+    loadStartFrameInLtx(file, handoffPrompt, msrReferences)
   }
 
   const generateLtx = async (options: Ltx25GenerationOptions, input: MediaFile | null, handoff?: { characterProjectId?: string; locationProjectId?: string }) => {
@@ -1724,12 +1730,13 @@ function App() {
     <div className={`app-shell ${sidebarOpen ? '' : 'sidebar-collapsed'}`}>
       <header className="titlebar" aria-label="Application title bar">
         <button className="titlebar-mobile-menu" onClick={() => setSidebarOpen(true)} aria-label="Open workspace menu"><Menu size={18} /></button>
-        <div className="titlebar-brand"><span className="brand-mark"><Film size={16} /></span><span>MiniMax Studio</span></div>
+        <div className="titlebar-brand"><span className="brand-mark"><Film size={18} /></span><span><strong>MiniMax Studio</strong><small>Create&nbsp;&nbsp;•&nbsp;&nbsp;Visualize&nbsp;&nbsp;•&nbsp;&nbsp;Tell Stories</small></span></div>
+        <button className="titlebar-search" type="button" onClick={() => setView('library')} title="Search generated media in Library"><Search size={15} /><span>Search assets, projects, or prompts…</span><kbd>Library</kbd></button>
         <div className="titlebar-drag" />
         {activeRenderRuntime !== undefined && <span className={`titlebar-runtime ${activeRenderJob?.status === 'running' || activeRenderJob?.status === 'queued' ? 'active' : ''}`} role="status" title="Total time since this render was queued"><Clock3 size={13} />{activeRenderJob?.status === 'queued' ? 'Queued' : activeRenderJob?.status === 'running' ? 'Rendering' : 'Render'} · {formatRuntime(activeRenderRuntime)}</span>}
         {activeSamplerProgress && <span className="titlebar-sampler" role="status" title={`ComfyUI sampler progress: ${activeSamplerProgress.currentStep} of ${activeSamplerProgress.totalSteps}${activeSamplerProgress.rate ? `, averaging ${formatStepDuration(activeSamplerProgress.rate)}` : ''}${activeSamplerProgress.nextStepIn !== undefined ? `, approximately ${formatRuntime(activeSamplerProgress.nextStepIn)} until the next update` : ''}`}><Gauge size={13} /><strong>{activeSamplerProgress.progress}%</strong><span>{activeSamplerProgress.currentStep}/{activeSamplerProgress.totalSteps}</span>{activeSamplerProgress.rate && <span className="sampler-step-rate">{formatStepDuration(activeSamplerProgress.rate)}</span>}{activeSamplerProgress.nextStepIn !== undefined && <span>next ≈ {formatRuntime(activeSamplerProgress.nextStepIn)}</span>}</span>}
         {(view === 'create' || view === 'ltx25' || view === 'zimage') && <button className="titlebar-action titlebar-reset" onClick={resetCurrentWorkspace} title="Reset prompts, options, media, selections, and the current preview in this workspace"><RotateCcw size={14} />Reset workspace</button>}
-        {workspaceProjectScope(view) && <button className="titlebar-action titlebar-projects" onClick={() => setProjectManagerOpen(true)} title="Save, open, and manage full workspace projects"><FolderOpen size={14} />Projects</button>}
+        {workspaceProjectScope(view) && <button className="titlebar-action titlebar-projects" onClick={() => setProjectManagerOpen(true)} title="Save, open, and manage full workspace projects"><FolderOpen size={14} /><span>Project: Current workspace</span><ChevronDown size={13} /></button>}
         <GpuMeter value={gpu} />
         <button className="titlebar-action titlebar-help" onClick={() => setHelpOpen(true)} title="Show tips for this workspace" aria-label="Show workspace tips"><HelpCircle size={15} />Tips</button>
         <button className="titlebar-action" onClick={() => { setLanOpen(true); void window.minimax.getLanStatus().then(setLanStatus) }} title="Share MiniMax Studio over your local network"><QrCode size={14} />LAN</button>
@@ -1748,23 +1755,24 @@ function App() {
           <button className="icon-button sidebar-toggle" onClick={() => setSidebarOpen((value) => !value)} aria-label={sidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'}><PanelLeftClose size={18} /></button>
         </div>
         <nav aria-label="Primary navigation">
-          <div className="nav-group"><span className="nav-section-label">Generate</span>
-            <NavButton active={view === 'create'} icon={WandSparkles} label="Create" onClick={() => { setCharacterHandoff(null); setView('create') }} />
+          <div className="nav-group"><span className="nav-section-label">Create</span>
+            <NavButton active={view === 'create'} icon={WandSparkles} label="Video" onClick={() => { setCharacterHandoff(null); setView('create') }} />
+            <NavButton active={view === 'zimage'} icon={ImageIcon} label="Image" onClick={() => setView('zimage')} />
             <NavButton active={view === 'ltx25'} icon={Aperture} label="LTX 2.5" onClick={() => setView('ltx25')} />
             <NavButton active={view === 'music'} icon={Music2} label="Music" onClick={() => setView('music')} />
           </div>
-          <div className="nav-group"><span className="nav-section-label">Plan</span>
-            <NavButton active={view === 'zimage'} icon={ImageIcon} label="Create Image" onClick={() => setView('zimage')} />
+          <div className="nav-group"><span className="nav-section-label">Assets</span>
             <NavButton active={view === 'characters'} icon={Users} label="Characters" itemType="character" onClick={() => setView('characters')} />
             <NavButton active={view === 'hair'} icon={Scissors} label="Hair" onClick={() => setView('hair')} />
             <NavButton active={view === 'wardrobes'} icon={Shirt} label="Wardrobe" itemType="wardrobe" onClick={() => setView('wardrobes')} />
             <NavButton active={view === 'accessories'} icon={Watch} label="Accessories" onClick={() => setView('accessories')} />
             <NavButton active={view === 'locations'} icon={MapPin} label="Locations" itemType="location" onClick={() => setView('locations')} />
           </div>
-          <div className="nav-group"><span className="nav-section-label">Review</span>
-            <NavButton active={view === 'queue'} icon={ListVideo} label="Queue" count={pendingJobs.length} onClick={() => setView('queue')} />
+          <div className="nav-group"><span className="nav-section-label">Project</span>
             <NavButton active={view === 'library'} icon={Library} label="Library" onClick={() => setView('library')} />
+            <NavButton active={view === 'queue'} icon={ListVideo} label="Queue" count={pendingJobs.length} onClick={() => setView('queue')} />
             <NavButton active={view === 'editor'} icon={Scissors} label="Clip editor" onClick={() => setView('editor')} />
+            <NavButton active={view === 'movie'} icon={Clapperboard} label="Movie planner" onClick={() => setView('movie')} />
           </div>
         </nav>
         <div className="sidebar-spacer" />
@@ -1772,7 +1780,6 @@ function App() {
           <HardDrive size={17} />
           <div><strong>{modelReady ? 'Models ready' : 'Models incomplete'}</strong><span>{models.length} local files indexed</span></div>
         </div>
-        <nav className="sidebar-secondary" aria-label="Advanced tools"><div className="nav-group"><span className="nav-section-label">Advanced tools</span><NavButton active={view === 'movie'} icon={Clapperboard} label="Movie" onClick={() => setView('movie')} /></div></nav>
         <NavButton active={view === 'settings'} icon={Settings} label="Settings" onClick={() => setView('settings')} />
       </aside>
 
@@ -1949,7 +1956,7 @@ function App() {
           setNotice({ tone: 'success', text: `${shot.title} loaded into Create.${inputNote}` })
         }} />}
         {view === 'queue' && <JobsView title="Queue" note="Running and recent local generations" jobs={jobs} empty="No generations have been queued." cancellingIds={cancellingIds} onCancel={cancelJob} />}
-        {view === 'library' && <LibraryView jobs={jobs.filter((job) => job.status === 'completed')} settings={settings} onEdit={() => setView('editor')} onUseLtx={useStartFrameInLtx} onNotice={(tone, text) => setNotice({ tone, text })} />}
+        {view === 'library' && <LibraryView jobs={jobs.filter((job) => job.status === 'completed')} settings={settings} onEdit={() => setView('editor')} onUseLtx={loadStartFrameInLtx} onNotice={(tone, text) => setNotice({ tone, text })} />}
         {view === 'editor' && <ClipEditor settings={settings} jobs={jobs} onNotice={(tone, text) => setNotice({ tone, text })} onUseFrame={(file, target, clip) => {
           if (target === 'reference') { setSelectedReferenceCharacterIds([]); setSelectedReferenceLocationIds([]); setReferenceImages((items) => [...items, file].slice(0, 9)); setMode('reference') }
           else if (target === 'last') { setLastFrame(file); setMode('frames') }
@@ -1973,14 +1980,19 @@ function App() {
   )
 }
 
-function LanCompanionDialog({ status, qr, onRotate, onClose }: { status: LanStatus; qr: string; onRotate(): Promise<void>; onClose(): void }) {
+function LanCompanionDialog({ status, qr, onRotate, onClose }: { status: LanStatus; qr: { mobile: string; desktop: string }; onRotate(): Promise<void>; onClose(): void }) {
   const [rotating, setRotating] = useState(false)
+  const desktopUrl = status.desktopUrl ?? status.url?.replace('?mobile=1', '?desktop=1') ?? ''
   return <div className="lan-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
     <section className="lan-dialog" role="dialog" aria-modal="true" aria-labelledby="lan-dialog-title">
       <header><div><QrCode size={20} /><span><strong id="lan-dialog-title">Share over your LAN</strong><small>Touch-first mobile creation or the complete Studio interface</small></span></div><button className="icon-button" onClick={onClose} aria-label="Close LAN sharing"><X size={18} /></button></header>
       {status.running && status.url ? <div className="lan-dialog-body">
-        <div className="lan-qr">{qr ? <img src={qr} alt="QR code for the MiniMax mobile companion" /> : <LoaderCircle className="spin" aria-label="Preparing QR code" />}</div>
-        <div className="lan-instructions"><span className="lan-ready"><Check size={15} />LAN server ready</span><h2>Open on another device</h2><p>Scan for the touch-first mobile workspace, or open the full interface on a tablet or computer connected to the same trusted Wi-Fi or LAN.</p><label>Mobile address<input readOnly value={status.url} onFocus={(event) => event.currentTarget.select()} /></label><label>Full Studio address<input readOnly value={status.desktopUrl ?? status.url.replace('?mobile=1', '?desktop=1')} onFocus={(event) => event.currentTarget.select()} /></label><small>The full Studio view shares the interface and browser-local project state. Hardware generation and local-file access remain protected by the authenticated LAN services. Windows Firewall may ask to allow private-network access the first time.</small></div>
+        <div className="lan-instructions"><span className="lan-ready"><Check size={15} />LAN server ready</span><h2>Open on another device</h2><p>Scan the experience you want on a phone, tablet, or computer connected to the same trusted Wi-Fi or LAN.</p></div>
+        <div className="lan-share-grid">
+          <article className="lan-share-card"><div className="lan-qr">{qr.mobile ? <img src={qr.mobile} alt="QR code for the touch-first mobile MiniMax workspace" /> : <LoaderCircle className="spin" aria-label="Preparing mobile QR code" />}</div><div><strong>Touch-first mobile creation</strong><small>Fast controls for creating and monitoring shots from a phone.</small><label>Mobile address<input readOnly value={status.url} onFocus={(event) => event.currentTarget.select()} /></label></div></article>
+          <article className="lan-share-card"><div className="lan-qr">{qr.desktop ? <img src={qr.desktop} alt="QR code for the complete MiniMax Studio interface" /> : <LoaderCircle className="spin" aria-label="Preparing Studio QR code" />}</div><div><strong>Complete Studio interface</strong><small>Full workspace for desktop or tablet editing and production.</small><label>Studio address<input readOnly value={desktopUrl} onFocus={(event) => event.currentTarget.select()} /></label></div></article>
+        </div>
+        <small className="lan-security-note">The full Studio view shares the interface and browser-local project state. Hardware generation and local-file access remain protected by authenticated LAN services. Windows Firewall may ask to allow private-network access the first time.</small>
       </div> : <div className="lan-dialog-error"><AlertCircle size={22} /><span><strong>Mobile server unavailable</strong><p>{status.error ?? 'Restart MiniMax Studio, then try again.'}</p></span></div>}
       <footer><button className="secondary-button" disabled={rotating || !status.running} title="Invalidate previously scanned mobile links" onClick={async () => { if (!window.confirm('Rotate the mobile access link? Previously scanned links will stop working.')) return; setRotating(true); try { await onRotate() } finally { setRotating(false) } }}><RotateCcw size={14} />{rotating ? 'Rotating…' : 'Rotate access link'}</button><button className="primary-button" onClick={onClose}>Done</button></footer>
     </section>
@@ -2160,10 +2172,10 @@ function CreateView(props: CreateViewProps) {
   }
   const setUserLoraSlot = (index: number, patch: Partial<{ name: string; strength: number }>) => setUserLoras(userLoras.map((slot, slotIndex) => slotIndex === index ? { ...slot, ...patch } : slot))
   return (
-    <div className="create-page">
+    <div className="create-page minimax-workspace">
       <div className="page-heading">
-        <div><p className="eyebrow">LOCAL VIDEO WORKSPACE</p><h1>Create with MiniMax H3</h1><p>Generate synchronized video and audio through your local ComfyUI engine.</p></div>
-        <div className="heading-state"><span className={modelReady && h3Validated ? 'ok' : 'warn'}>{modelReady && h3Validated ? <Check size={15} /> : <AlertCircle size={15} />}{!modelReady ? 'Check model paths' : h3Validated ? 'Validated H3 stack' : 'Custom H3 stack'}</span></div>
+        <div><p className="eyebrow">CREATE · MINIMAX H3</p><h1>Video Creation</h1><p>Generate cinematic video with references, reusable assets, and focused production controls.</p></div>
+        <div className="heading-actions"><div className="heading-model-card"><span><small>MODEL</small><strong>MiniMax H3</strong><em>{modeInfo.find((item) => item.id === mode)?.note ?? 'Video generation'}</em></span><Film size={22} /></div><div className="heading-state"><span className={modelReady && h3Validated ? 'ok' : 'warn'}>{modelReady && h3Validated ? <Check size={15} /> : <AlertCircle size={15} />}{!modelReady ? 'Check model paths' : h3Validated ? 'Validated H3 stack' : 'Custom H3 stack'}</span></div></div>
       </div>
 
       <nav className="workspace-stage-nav" aria-label="Create workspace sections">
@@ -2176,16 +2188,24 @@ function CreateView(props: CreateViewProps) {
 
       <div className="workspace-grid">
         <section className="composer-panel">
-          <div className="mode-tabs" role="tablist" aria-label="Generation mode">
-            {modeInfo.map((item) => <button key={item.id} role="tab" aria-selected={mode === item.id} className={mode === item.id ? 'selected' : ''} onClick={() => setMode(item.id)}><item.icon size={18} /><span><strong>{item.label}</strong><small>{item.note}</small></span></button>)}
+          <div className="workspace-command-deck">
+            <div className="mode-tabs" role="tablist" aria-label="Generation mode">
+              {modeInfo.map((item) => <button key={item.id} role="tab" aria-selected={mode === item.id} className={mode === item.id ? 'selected' : ''} onClick={() => setMode(item.id)}><item.icon size={18} /><span><strong>{item.label}</strong><small>{item.note}</small></span></button>)}
+            </div>
+
+            <div className="creative-tools-bar" aria-label="Creative tools">
+              <span>CREATIVE TOOLS</span>
+              <button type="button" onClick={() => onPromptTool('enhance')} disabled={!ollamaAvailable || Boolean(promptingTool)}>{promptingTool === 'enhance' ? <LoaderCircle size={14} className="spin" /> : <WandSparkles size={14} />}Enhance prompt</button>
+              <button type="button" onClick={() => onPromptTool('timeline')} disabled={!ollamaAvailable || Boolean(promptingTool)}>{promptingTool === 'timeline' ? <LoaderCircle size={14} className="spin" /> : <Clock3 size={14} />}Shot timeline</button>
+              <button type="button" onClick={() => { promptRef.current?.focus(); insertPromptText('Camera: ') }}><Plus size={14} />Insert command</button>
+            </div>
           </div>
 
           <section id="workspace-direction" className={`create-section create-direction-section ${mode === 'reference' ? 'reference-prompt-builder' : ''}`}>
             <div className="create-section-heading"><span><WandSparkles size={15} /></span><div><strong>{mode === 'reference' ? 'Prompt Builder' : 'Shot direction'}</strong><small>{mode === 'reference' ? 'Compose the scene while reference assignments and safeguards stay synchronized.' : 'Describe the subject, action, camera, lighting, and sound.'}</small></div><em className={prompt.trim() ? 'complete' : ''}>{prompt.trim() ? 'Ready' : 'Required'}</em></div>
           <div className="field-group prompt-field">
             {mode === 'reference' && <>
-              <AutomaticReferenceSummary bindings={activeSelectedBindings} onReview={() => setAutomaticPromptOpen(true)} onCopy={() => void copyComposedPrompt()} copyState={copyState} />
-              <ReferenceMediaStrip files={builderReferenceImages} bindings={activeSelectedBindings} videoCount={referenceVideos.length} audioCount={referenceAudios.length} onManage={() => void refreshSourceMedia().then(() => setSourceMediaOpen(true))} />
+              <ReferenceMediaStrip buttonRef={sourceMediaTriggerRef} files={builderReferenceImages} bindings={activeSelectedBindings} videoCount={referenceVideos.length} audioCount={referenceAudios.length} onManage={() => void refreshSourceMedia().then(() => setSourceMediaOpen(true))} />
               <div className="reference-editor-heading"><span><WandSparkles size={15} /></span><div><strong>Edit your prompt</strong><small>Use <code>//</code> commands to insert characters, wardrobe, locations, camera, action, and more.</small></div></div>
             </>}
             <div className="field-label"><label htmlFor="prompt">{mode === 'reference' ? 'Scene prompt' : 'Prompt'}</label><span>{prompt.length.toLocaleString()} characters</span></div>
@@ -2194,6 +2214,7 @@ function CreateView(props: CreateViewProps) {
               <label className="no-dialogue-toggle" title={`Adds a render instruction that blocks spoken words, narration, singing, lip-sync, captions, and text overlays${mode === 'reference' ? ' in this Reference render' : ''}.`}><input type="checkbox" checked={noDialogue} onChange={(event) => setNoDialogue(event.target.checked)} /><span><strong>{mode === 'reference' ? 'No dialogue · Reference mode' : 'No dialogue'}</strong><small>{noDialogue ? 'Ambient sound only' : 'Dialogue and lip-sync allowed'}</small></span></label>
               <label className="no-dialogue-toggle natural-movement-toggle" title="Adds restrained breathing, blinking, eye movement, and posture adjustment without changing the requested action, pose, camera, identity, wardrobe, or scene."><input type="checkbox" checked={naturalMovement} onChange={(event) => setNaturalMovement(event.target.checked)} /><span><strong>Natural movement</strong><small>{naturalMovement ? 'Subtle subject motion' : 'No added motion direction'}</small></span></label>
             </div>
+            {mode === 'reference' && <AutomaticReferenceSummary bindings={activeSelectedBindings} onReview={() => setAutomaticPromptOpen(true)} onCopy={() => void copyComposedPrompt()} copyState={copyState} />}
             {mode === 'reference' && <PromptInspector bindings={activeSelectedBindings} prompt={prompt} duration={duration} videoCount={referenceVideos.length} audioCount={referenceAudios.length} onOptimize={() => onPromptTool('enhance')} optimizing={Boolean(promptingTool)} canOptimize={ollamaAvailable} />}
             {mode === 'reference' && <ReferencePromptHelper pictureCount={builderReferenceImages.length} videoCount={referenceVideos.length} audioCount={referenceAudios.length} referenceInstructions={[...composeReferenceInstructions(activeSelectedBindings), ...detailReferenceDirection]} onInsert={insertPromptText} />}
             <div className="prompt-tools" aria-label="Local AI prompt tools">
@@ -2223,26 +2244,12 @@ function CreateView(props: CreateViewProps) {
           </div>
           </section>
 
-          {(mode === 'image' || mode === 'frames' || mode === 'reference') && <section id="workspace-sources" className={`create-section create-input-section ${mode === 'reference' ? 'source-media-section' : ''}`}>
-            <div className="create-section-heading"><span><ImageIcon size={15} /></span><div><strong>Source media</strong><small>{mode === 'reference' ? 'Choose reusable identity, motion, and audio references.' : mode === 'frames' ? 'Set the opening and closing composition.' : 'Choose the frame this shot begins from.'}</small></div><em className={(mode === 'reference' ? referenceImages.length + referenceVideos.length + referenceAudios.length > 0 : firstFrame && (mode !== 'frames' || lastFrame)) ? 'complete' : ''}>{mode === 'reference' ? `${referenceImages.length + referenceVideos.length + referenceAudios.length} loaded` : mode === 'frames' ? `${Number(Boolean(firstFrame)) + Number(Boolean(lastFrame))} of 2` : firstFrame ? 'Ready' : 'Required'}</em></div>
+          {(mode === 'image' || mode === 'frames') && <section id="workspace-sources" className="create-section create-input-section">
+            <div className="create-section-heading"><span><ImageIcon size={15} /></span><div><strong>Source media</strong><small>{mode === 'frames' ? 'Set the opening and closing composition.' : 'Choose the frame this shot begins from.'}</small></div><em className={firstFrame && (mode !== 'frames' || lastFrame) ? 'complete' : ''}>{mode === 'frames' ? `${Number(Boolean(firstFrame)) + Number(Boolean(lastFrame))} of 2` : firstFrame ? 'Ready' : 'Required'}</em></div>
           {(mode === 'image' || mode === 'frames') && (
             <div className={`frame-grid ${mode === 'image' ? 'single' : ''}`}>
               <div><MediaDrop label="First frame" note="PNG, JPG or WebP" file={firstFrame} onChoose={() => void chooseMedia('image', (file) => setFirstFrame(file))} onRemove={() => setFirstFrame(null)} />{firstFrame && <ImageCrop label="First frame" file={firstFrame} resolution={resolution} onChange={setFirstFrame} />}</div>
               {mode === 'frames' && <div><MediaDrop label="Last frame" note="Automatically fitted to output size" file={lastFrame} onChoose={() => void chooseMedia('image', (file) => setLastFrame(file))} onRemove={() => setLastFrame(null)} />{lastFrame && <ImageCrop label="Last frame" file={lastFrame} resolution={resolution} onChange={setLastFrame} />}</div>}
-            </div>
-          )}
-          {mode === 'reference' && (
-            <div className="source-media-summary">
-              <div className="source-media-overview" aria-label="Selected source media summary">
-                <SourceMediaStat icon={Users} label="Cast" value={selectedCharacterIds.length ? `${selectedCharacterIds.length} selected` : 'None'} />
-                <SourceMediaStat icon={MapPin} label="Locations" value={selectedLocationIds.length ? `${selectedLocationIds.length} selected` : 'None'} />
-                <SourceMediaStat icon={ImageIcon} label="Pictures" value={`${referenceImages.length} of 9`} />
-                <SourceMediaStat icon={Film} label="Video + audio" value={`${referenceVideos.length} + ${referenceAudios.length}`} />
-              </div>
-              <div className="source-media-summary-footer">
-                <span><strong>{clothingPolicy === 'wardrobe' ? 'Assigned wardrobe' : clothingPolicy === 'underwear' ? 'Underwear' : 'Unrestricted'}</strong><small>{refImageSize === 'max' ? 'Maximum identity' : 'Balanced fidelity'}</small></span>
-                <button ref={sourceMediaTriggerRef} type="button" className="primary-button source-media-manage" onClick={() => void refreshSourceMedia().then(() => setSourceMediaOpen(true))}><SlidersHorizontal size={15} />Manage source media</button>
-              </div>
             </div>
           )}
           </section>}
@@ -2280,7 +2287,7 @@ function CreateView(props: CreateViewProps) {
         </section>
 
         <aside id="workspace-preview" className="preview-panel">
-          <div className="panel-heading"><div><span>OUTPUT</span><strong>Current workspace</strong></div>{latestJob && <StatusBadge status={latestJob.status} />}</div>
+          <div className="panel-heading"><div><span>PREVIEW</span><strong>Current workspace</strong></div><div className="preview-toolbar">{latestJob && <StatusBadge status={latestJob.status} />}<button type="button" className="icon-button" aria-label="Toggle fullscreen preview" title="Toggle fullscreen preview" onClick={() => { const panel = document.getElementById('workspace-preview'); if (document.fullscreenElement) void document.exitFullscreen(); else if (panel) void panel.requestFullscreen() }}><Maximize2 size={15} /></button></div></div>
           {latestJob?.mediaType !== 'image' && liveEnabled && livePreview && livePreview.promptId === latestJob?.promptId && latestJob && ['running', 'queued'].includes(latestJob.status) && <figure className={`live-preview ${livePreview.animated ? 'animated' : ''} ${blurNsfwPreview && hasSensitivePreviewWording(latestJob.prompt) ? 'sensitive-preview' : ''}`} tabIndex={blurNsfwPreview && hasSensitivePreviewWording(latestJob.prompt) ? 0 : undefined}>{livePreview.mime === 'video/mp4' ? <video key={livePreview.url} src={livePreview.url} aria-label="Animated MiniMax H3 generation preview" autoPlay loop muted playsInline /> : <img key={livePreview.url} src={livePreview.url} alt={livePreview.animated ? 'Animated MiniMax H3 generation preview' : 'Live generation preview'} />}{blurNsfwPreview && hasSensitivePreviewWording(latestJob.prompt) && <span className="sensitive-preview-notice">Sensitive preview · hover or focus to reveal</span>}<figcaption>{livePreview.animated ? `Animated H3 preview · 50 frames${livePreview.fps ? ` · ${livePreview.fps} fps` : ''}${livePreview.step && livePreview.totalSteps ? ` · sampler step ${livePreview.step} of ${livePreview.totalSteps}` : ''}` : 'Live preview · intermediate frame'}</figcaption></figure>}
           <div className="preview-stage">
             {latestJob?.outputUrl ? latestJob.mediaType === 'image' ? <img className="reference-still-output" src={latestJob.outputUrl} alt="Generated Ref2VA reference still" /> : <VideoPlayer src={latestJob.outputUrl} /> : latestJob && ['queued', 'running'].includes(latestJob.status) ? <div className="render-state constructing" data-render-state={latestJob.status}><RenderConstruction state={latestJob.status} /><div className="render-status-kicker"><i />{latestJob.status === 'queued' ? 'Queued locally' : 'Local engine active'}</div><strong>{latestJob.progressLabel ?? (latestJob.status === 'queued' ? 'Waiting in queue' : latestJob.mediaType === 'image' ? 'Generating one reference still' : 'Rendering locally')}</strong><span>{latestJob.currentStep !== undefined && latestJob.totalSteps ? `Live sampler step ${latestJob.currentStep} of ${latestJob.totalSteps}` : `${latestJob.width} × ${latestJob.height}${latestJob.mediaType === 'image' ? ' · one still' : ` · ${latestJob.duration}s`}`}</span><div className="progress"><i style={{ width: `${latestJob.progress}%` }} /></div><div className="render-stage-rail" aria-label={`Render status: ${latestJob.status === 'queued' ? 'queued' : 'sampling'}`}><span className="complete">Prepared</span><span className={latestJob.status === 'queued' ? 'active' : 'complete'}>Queued</span><span className={latestJob.status === 'running' ? 'active' : ''}>Rendering</span><span>Output</span></div><small>{Math.round(latestJob.progress)}% · live ComfyUI status</small></div> : <div className="empty-preview"><div className="preview-icon"><Film size={28} /></div><strong>Your video will appear here</strong><span>Configure a shot, then send it to the local engine.</span></div>}
@@ -2316,10 +2323,6 @@ function CreateView(props: CreateViewProps) {
   )
 }
 
-function SourceMediaStat({ icon: Icon, label, value }: { icon: typeof Film; label: string; value: string }) {
-  return <span className="source-media-stat"><Icon size={15} /><span><small>{label}</small><strong>{value}</strong></span></span>
-}
-
 function referenceBindingLabel(binding: MovieReferenceBinding, index: number) {
   const title = binding.label.replace(/^(Character|Wardrobe|Hair|Accessory|Location):\s*/i, '').replace(/\s*\/\s*(identity|wardrobe|hair|accessory|location).*$/i, '')
   const type = binding.purpose === 'wardrobe' ? 'Outfit' : binding.purpose === 'hair' ? 'Hair' : binding.purpose === 'location' ? 'Location' : binding.purpose === 'accessory' ? 'Accessory' : binding.purpose === 'detail' ? 'Detail' : 'Identity'
@@ -2347,16 +2350,18 @@ function PromptInspector({ bindings, prompt, duration, videoCount, audioCount, o
     !checks.find(([label]) => label === 'Camera')?.[1] && 'No camera direction detected. H3 can infer one, but a deliberate camera choice is more controllable.',
     !checks.find(([label]) => label === 'Audio')?.[1] && 'No sound direction detected. Add ambience or choose “No dialogue” for a more deterministic audio pass.',
   ].filter(Boolean) as string[]
-  return <aside className="prompt-inspector" aria-labelledby="prompt-inspector-title">
-    <header><span><Gauge size={15} /><span><strong id="prompt-inspector-title">Prompt inspector</strong><small>Live production checks · automatic context is protected</small></span></span><em>{bindings.length} / 9 refs</em></header>
-    <div className="prompt-inspector-grid">
-      <section><span className="prompt-inspector-label">Characters</span>{characterGroups.size ? [...characterGroups.values()].map((group) => { const name = group.find((binding) => binding.purpose === 'character' || binding.purpose === 'character-angle')?.label.replace(/^Character:\s*/, '').split(' / ')[0] ?? group[0].label.split(' for ').at(-1); const roles = new Set(group.map((binding) => binding.purpose)); return <p key={group[0].characterId}><Check size={12} /><span><strong>{name}</strong><small>{group.length} assigned · {[...roles].map((role) => role === 'character-angle' ? 'identity' : role).join(', ')}</small></span></p> }) : <p className="empty"><AlertCircle size={12} /><span>No linked character</span></p>}</section>
-      <section><span className="prompt-inspector-label">Location</span>{locationGroups.size ? [...locationGroups.values()].map((group) => <p key={group[0].locationId ?? group[0].label}><Check size={12} /><span><strong>{group[0].label.replace(/^Location:\s*/, '')}</strong><small>{group.length} approved view{group.length === 1 ? '' : 's'}</small></span></p>) : <p className="empty"><AlertCircle size={12} /><span>No linked location</span></p>}</section>
-      <section><span className="prompt-inspector-label">Creative direction</span><div className="prompt-inspector-checks">{checks.map(([label, complete]) => <span className={complete ? 'complete' : 'missing'} key={label}>{complete ? <Check size={11} /> : <AlertCircle size={11} />}{label}</span>)}</div></section>
+  return <details className="prompt-inspector">
+    <summary><span><Gauge size={15} /><span><strong>Prompt checks</strong><small>Characters, location, direction, and render warnings</small></span></span><span><em>{warnings.length ? `${warnings.length} warning${warnings.length === 1 ? '' : 's'}` : 'Ready'}</em><small>{bindings.length} / 9 refs</small><ChevronDown size={14} /></span></summary>
+    <div className="prompt-inspector-body">
+      <div className="prompt-inspector-grid">
+        <section><span className="prompt-inspector-label">Characters</span>{characterGroups.size ? [...characterGroups.values()].map((group) => { const name = group.find((binding) => binding.purpose === 'character' || binding.purpose === 'character-angle')?.label.replace(/^Character:\s*/, '').split(' / ')[0] ?? group[0].label.split(' for ').at(-1); const roles = new Set(group.map((binding) => binding.purpose)); return <p key={group[0].characterId}><Check size={12} /><span><strong>{name}</strong><small>{group.length} assigned · {[...roles].map((role) => role === 'character-angle' ? 'identity' : role).join(', ')}</small></span></p> }) : <p className="empty"><AlertCircle size={12} /><span>No linked character</span></p>}</section>
+        <section><span className="prompt-inspector-label">Location</span>{locationGroups.size ? [...locationGroups.values()].map((group) => <p key={group[0].locationId ?? group[0].label}><Check size={12} /><span><strong>{group[0].label.replace(/^Location:\s*/, '')}</strong><small>{group.length} approved view{group.length === 1 ? '' : 's'}</small></span></p>) : <p className="empty"><AlertCircle size={12} /><span>No linked location</span></p>}</section>
+        <section><span className="prompt-inspector-label">Creative direction</span><div className="prompt-inspector-checks">{checks.map(([label, complete]) => <span className={complete ? 'complete' : 'missing'} key={label}>{complete ? <Check size={11} /> : <AlertCircle size={11} />}{label}</span>)}</div></section>
+      </div>
+      {warnings.length > 0 && <div className="prompt-inspector-warnings"><span><AlertCircle size={13} />Warnings</span>{warnings.map((warning) => <p key={warning}>{warning}</p>)}</div>}
+      <footer><span>{videoCount ? `${videoCount} motion reference${videoCount === 1 ? '' : 's'}` : 'No motion reference'} · {audioCount ? `${audioCount} audio reference${audioCount === 1 ? '' : 's'}` : 'no audio reference'}</span><button type="button" className="secondary-button" onClick={onOptimize} disabled={!canOptimize || optimizing || !prompt.trim()}>{optimizing ? <LoaderCircle className="spin" size={13} /> : <WandSparkles size={13} />}Optimize</button></footer>
     </div>
-    {warnings.length > 0 && <div className="prompt-inspector-warnings"><span><AlertCircle size={13} />Warnings</span>{warnings.map((warning) => <p key={warning}>{warning}</p>)}</div>}
-    <footer><span>{videoCount ? `${videoCount} motion reference${videoCount === 1 ? '' : 's'}` : 'No motion reference'} · {audioCount ? `${audioCount} audio reference${audioCount === 1 ? '' : 's'}` : 'no audio reference'}</span><button type="button" className="secondary-button" onClick={onOptimize} disabled={!canOptimize || optimizing || !prompt.trim()}>{optimizing ? <LoaderCircle className="spin" size={13} /> : <WandSparkles size={13} />}Optimize</button></footer>
-  </aside>
+  </details>
 }
 
 function AutomaticReferenceSummary({ bindings, onReview, onCopy, copyState }: { bindings: MovieReferenceBinding[]; onReview(): void; onCopy(): void; copyState: 'idle' | 'copied' | 'failed' }) {
@@ -2380,7 +2385,7 @@ function AutomaticReferenceModal({ bindings, detailInstructions, onClose, onMana
   </div>
 }
 
-function ReferenceMediaStrip({ files, bindings, videoCount, audioCount, onManage }: { files: MediaFile[]; bindings: MovieReferenceBinding[]; videoCount: number; audioCount: number; onManage(): void }) {
+function ReferenceMediaStrip({ buttonRef, files, bindings, videoCount, audioCount, onManage }: { buttonRef?: Ref<HTMLButtonElement>; files: MediaFile[]; bindings: MovieReferenceBinding[]; videoCount: number; audioCount: number; onManage(): void }) {
   const labelFor = (file: MediaFile, index: number) => {
     const binding = bindings.find((item) => item.file.path === file.path)
     if (!binding) return { title: file.name, type: 'Picture' }
@@ -2388,7 +2393,7 @@ function ReferenceMediaStrip({ files, bindings, videoCount, audioCount, onManage
   }
   return <section className="reference-media-strip" aria-labelledby="reference-media-title">
     <header><span><ImageIcon size={15} /><strong id="reference-media-title">Reference images <em>{files.length}</em></strong></span><small>{videoCount ? `${videoCount} video${videoCount === 1 ? '' : 's'}` : ''}{videoCount && audioCount ? ' · ' : ''}{audioCount ? `${audioCount} audio` : ''}</small></header>
-    <div>{files.map((file, index) => { const label = labelFor(file, index); return <figure key={`${file.path}-${index}`}>{file.preview ? <img src={file.preview} alt="" /> : <span><ImageIcon size={22} /></span>}<figcaption><b>{index + 1}</b><span><strong title={label.title}>{label.title}</strong><small>{label.type}</small></span></figcaption></figure> })}<button type="button" className="reference-add-card" onClick={onManage}><Plus size={22} /><span>{files.length ? 'Manage references' : 'Add references'}</span></button></div>
+    <div>{files.map((file, index) => { const label = labelFor(file, index); return <figure key={`${file.path}-${index}`}>{file.preview ? <img src={file.preview} alt="" /> : <span><ImageIcon size={22} /></span>}<figcaption><b>{index + 1}</b><span><strong title={label.title}>{label.title}</strong><small>{label.type}</small></span></figcaption></figure> })}<button ref={buttonRef} type="button" className="reference-add-card" onClick={onManage}><Plus size={22} /><span>{files.length ? 'Manage references' : 'Add references'}</span></button></div>
   </section>
 }
 
