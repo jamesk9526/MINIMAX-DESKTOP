@@ -263,3 +263,18 @@ export function extractOutputUrl(history: Record<string, unknown>, promptId: str
   }
   return undefined
 }
+
+/** Recover the exact ComfyUI output descriptor from a persisted media URL. */
+export function outputFileFromUrl(value: string): ComfyOutputFile | undefined {
+  try {
+    const wrapped = new URL(value)
+    if (wrapped.protocol !== 'minimax-media:' || wrapped.hostname !== 'comfy') return undefined
+    const upstream = wrapped.searchParams.get('url')
+    if (!upstream) return undefined
+    const target = new URL(upstream)
+    if (target.pathname !== '/view') return undefined
+    const filename = target.searchParams.get('filename')
+    if (!filename) return undefined
+    return { filename, subfolder: target.searchParams.get('subfolder') || undefined, type: target.searchParams.get('type') || undefined }
+  } catch { return undefined }
+}

@@ -56,7 +56,7 @@ import {
   Watch,
   X,
 } from 'lucide-react'
-import { buildMiniMaxReferenceStillWorkflow, buildMiniMaxWorkflow, extractOutputFile, extractOutputUrl, frameCount } from './lib/workflow'
+import { buildMiniMaxReferenceStillWorkflow, buildMiniMaxWorkflow, extractOutputFile, extractOutputUrl, frameCount, outputFileFromUrl } from './lib/workflow'
 import { buildLtx25Workflow } from './lib/ltx25Workflow'
 import { buildZImage } from './lib/zimage'
 import { attentionBackendLabel, resolveAttentionBackend } from './lib/attentionBackend'
@@ -917,7 +917,10 @@ function App() {
             }
           } else if (outputUrl && terminalState === 'completed') {
             recordMovieOutput(job.movieLink, outputUrl)
-            const localOutput = await window.minimax.findLatestOutput(settings.outputDirectory, job.createdAt, mediaType === 'audio' ? 'audio' : 'video')
+            const outputFile = extractOutputFile(history, promptId, mediaType)
+            // Resolve the exact output reported by ComfyUI. Never credit a
+            // concurrent render merely because it is the newest disk file.
+            const localOutput = outputFile ? await window.minimax.resolveOutput(settings.outputDirectory, outputFile) : null
             let extractionError: string | null = null
             if (job.characterProjectId) {
               recordCharacterTurntable(job.characterProjectId, localOutput ?? outputUrl)
@@ -929,7 +932,8 @@ function App() {
             if (extractionError) setNotice({ tone: 'error', text: `The video rendered, but its reference frames could not be extracted: ${extractionError}` })
             setJobs((current) => current.map((item) => item.id === job.id ? { ...item, status: 'completed', progress: 100, renderDurationMs: Date.now() - item.createdAt, outputUrl, localOutputPath: localOutput ?? undefined } : item))
           } else if (terminalState === 'completed') {
-            const localOutput = await window.minimax.findLatestOutput(settings.outputDirectory, job.createdAt, mediaType === 'audio' ? 'audio' : 'video')
+            const outputFile = extractOutputFile(history, promptId, mediaType)
+            const localOutput = outputFile ? await window.minimax.resolveOutput(settings.outputDirectory, outputFile) : null
             if (localOutput) recordMovieOutput(job.movieLink, localOutput)
             if (localOutput) recordCharacterTurntable(job.characterProjectId, localOutput)
             if (localOutput) recordLocationWalkthrough(job.locationProjectId, localOutput)
@@ -967,7 +971,8 @@ function App() {
   const startVideoContinuation = async (job: GenerationJob) => {
     if (!settings || !job.outputUrl) return
     try {
-      const source = job.localOutputPath ?? await window.minimax.findLatestOutput(settings.outputDirectory, job.createdAt)
+      const outputFile = outputFileFromUrl(job.outputUrl)
+      const source = job.localOutputPath ?? (outputFile ? await window.minimax.resolveOutput(settings.outputDirectory, outputFile) : null)
       if (!source) throw new Error('The completed video file could not be found in the output folder.')
       const extracted = await window.minimax.extractVideoFrame(source, 'last', settings.outputDirectory, settings.ffmpegPath)
       const frame: MediaFile = { ...extracted, name: `Locked continuation frame · ${extracted.name}`, kind: 'image', preview: await window.minimax.mediaUrl(extracted.path) }

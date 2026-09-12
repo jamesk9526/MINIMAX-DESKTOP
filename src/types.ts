@@ -395,6 +395,7 @@ export type DesktopApi = {
   interpolateVideo(source: string, outputDirectory: string, ffmpegPath: string, mode: 'fps-2x' | 'slow-motion'): Promise<{ path: string; url: string }>
   showOutput(path: string): Promise<void>
   findLatestOutput(outputDirectory: string, since: number, kind?: 'video' | 'audio'): Promise<string | null>
+  resolveOutput(outputDirectory: string, file: { filename: string; subfolder?: string; type?: string }): Promise<string | null>
   listOllamaModels(url: string, provider?: AppSettings['llmProvider']): Promise<OllamaModel[]>
   generateWithOllama(url: string, model: string, prompt: string, provider?: AppSettings['llmProvider']): Promise<string>
   generateWithOllamaVision(url: string, model: string, prompt: string, imagePaths: string[], provider?: AppSettings['llmProvider']): Promise<string>

@@ -107,6 +107,7 @@ export function installBrowserMock() {
     interpolateVideo: async () => { throw new Error('Open the desktop app to interpolate video with RIFE.') },
     showOutput: async () => undefined,
     findLatestOutput: async () => null,
+    resolveOutput: async () => null,
     listOllamaModels: async (_url, provider = 'ollama') => provider === 'lmstudio'
       ? [{ name: 'local-vision-model', size: 0, family: 'lmstudio', parameterSize: '', local: true }]
       : [

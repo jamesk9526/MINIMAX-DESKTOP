@@ -31,6 +31,7 @@ contextBridge.exposeInMainWorld('minimax', {
   interpolateVideo: (source: string, outputDirectory: string, ffmpegPath: string, mode: 'fps-2x' | 'slow-motion') => ipcRenderer.invoke('rife:interpolate', source, outputDirectory, ffmpegPath, mode),
   showOutput: (outputPath: string) => ipcRenderer.invoke('shell:show-output', outputPath),
   findLatestOutput: (outputPath: string, since: number, kind: 'video' | 'audio' = 'video') => ipcRenderer.invoke('outputs:latest', outputPath, since, kind),
+  resolveOutput: (outputPath: string, file: { filename: string; subfolder?: string; type?: string }) => ipcRenderer.invoke('outputs:resolve', outputPath, file),
   listOllamaModels: (url: string, provider: 'ollama' | 'lmstudio' = 'ollama') => ipcRenderer.invoke('ollama:list', url, provider),
   generateWithOllama: (url: string, model: string, prompt: string, provider: 'ollama' | 'lmstudio' = 'ollama') => ipcRenderer.invoke('ollama:generate', url, model, prompt, provider),
   generateWithOllamaVision: (url: string, model: string, prompt: string, imagePaths: string[], provider: 'ollama' | 'lmstudio' = 'ollama') => ipcRenderer.invoke('ollama:vision', url, model, prompt, imagePaths, provider),

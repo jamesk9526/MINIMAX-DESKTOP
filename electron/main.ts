@@ -1,7 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, nativeTheme, net, protocol } from 'electron'
 import { createReadStream, existsSync } from 'node:fs'
-import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
-import { basename, dirname, extname, join, normalize } from 'node:path'
+import { mkdir, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises'
+import { basename, dirname, extname, isAbsolute, join, normalize, relative, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
@@ -279,7 +279,9 @@ async function loadSettings(): Promise<AppSettings> {
 
 async function saveSettings(settings: AppSettings) {
   await mkdir(dirname(settingsPath()), { recursive: true })
-  await writeFile(settingsPath(), JSON.stringify(settings, null, 2), 'utf8')
+  const staged = `${settingsPath()}.tmp`
+  await writeFile(staged, JSON.stringify(settings, null, 2), 'utf8')
+  await rename(staged, settingsPath())
   return settings
 }
 
@@ -300,8 +302,10 @@ async function scanDirectory(root: string, kind: ModelKind) {
       if (entry.isDirectory()) {
         if (!entry.name.startsWith('.')) pending.push(fullPath)
       } else if (entry.isFile() && modelExtensions.has(extname(entry.name).toLowerCase())) {
-        const info = await stat(fullPath)
-        results.push({ name: entry.name, path: fullPath, kind, bytes: info.size })
+        try {
+          const info = await stat(fullPath)
+          results.push({ name: entry.name, path: fullPath, kind, bytes: info.size })
+        } catch { /* Skip one unreadable entry instead of losing the full scan. */ }
       }
     }
   }
@@ -330,6 +334,15 @@ async function findLatestMedia(root: string, since: number, kind: 'video' | 'aud
     }
   }
   return latest?.path ?? null
+}
+
+function resolveComfyOutput(outputDirectory: string, file: { filename?: unknown; subfolder?: unknown; type?: unknown }) {
+  if (file.type && file.type !== 'output') return null
+  if (typeof file.filename !== 'string' || !file.filename || typeof file.subfolder !== 'undefined' && typeof file.subfolder !== 'string') return null
+  const root = resolve(outputDirectory)
+  const candidate = resolve(root, file.subfolder ?? '', file.filename)
+  const pathInsideOutput = !isAbsolute(relative(root, candidate)) && !relative(root, candidate).startsWith('..') && relative(root, candidate) !== '..'
+  return pathInsideOutput && existsSync(candidate) ? candidate : null
 }
 
 function cleanUrl(url: string) {
@@ -855,6 +868,12 @@ app.whenReady().then(async () => {
     const path = await findLatestMedia(outputDirectory, since, kind)
     return path ? `minimax-media://local?path=${encodeURIComponent(path)}` : null
   })
+  ipcMain.handle('outputs:resolve', async (_event, outputDirectory: string, file: { filename?: unknown; subfolder?: unknown; type?: unknown }) => {
+    const settings = await loadSettings()
+    if (normalize(outputDirectory).toLowerCase() !== normalize(settings.outputDirectory).toLowerCase()) return null
+    const path = resolveComfyOutput(outputDirectory, file)
+    return path ? `minimax-media://local?path=${encodeURIComponent(path)}` : null
+  })
   ipcMain.handle('comfy:upload', async (_event, url: string, filePath: string, subfolder = 'minimax-desktop') => {
     const bytes = await readFile(filePath)
     const form = new FormData()
@@ -1052,6 +1071,9 @@ app.whenReady().then(async () => {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
+}).catch((error) => {
+  dialog.showErrorBox('MiniMax Studio failed to start', `Startup failed before the window could open:\n\n${error instanceof Error ? error.stack ?? error.message : String(error)}\n\nThe application will close.`)
+  app.quit()
 })
 
 app.on('window-all-closed', () => {
