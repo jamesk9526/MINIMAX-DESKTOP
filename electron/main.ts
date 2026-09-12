@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, nativeTheme, net, protocol } from 'electron'
 import { createReadStream, existsSync } from 'node:fs'
-import { mkdir, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises'
+import { cp, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises'
 import { basename, dirname, extname, isAbsolute, join, normalize, relative, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
@@ -232,6 +232,64 @@ function settingsPath() {
 
 function lanTokenPath() {
   return join(app.getPath('userData'), 'lan-access-token.txt')
+}
+
+function legacyUserDataPaths() {
+  const appData = app.getPath('appData')
+  const current = normalize(app.getPath('userData')).toLowerCase()
+  return ['minimax-desktop', 'MiniMax Studio', 'MiniMax H3 Studio']
+    .map((name) => join(appData, name))
+    .filter((path) => normalize(path).toLowerCase() !== current)
+}
+
+function legacyMigrationMarkerPath() {
+  return join(app.getPath('userData'), 'migrated-from-minimax-studio-v1.json')
+}
+
+function pendingBrowserStorageMigrationPath() {
+  return join(app.getPath('userData'), 'pending-minimax-browser-storage-migration-v1.json')
+}
+
+/**
+ * The rename changes Electron's app-data directory.  Carry the complete old
+ * profile forward once so settings, intents, local projects, media references,
+ * LAN pairing, and downloaded tools all stay available after the upgrade.
+ */
+const legacyBrowserStateEntries = ['Local Storage', 'IndexedDB', 'Session Storage', 'SharedStorage', 'Preferences']
+
+async function copyLegacyBrowserState(source: string, destination: string) {
+  for (const entry of legacyBrowserStateEntries) {
+    const from = join(source, entry)
+    if (!existsSync(from)) continue
+    await cp(from, join(destination, entry), { recursive: true, force: true, errorOnExist: false, filter: (path) => basename(path) !== 'LOCK' })
+  }
+}
+
+async function migrateLegacyUserData(options: { force?: boolean; replaceBrowserStorage?: boolean } = {}) {
+  if (!options.force && existsSync(legacyMigrationMarkerPath())) return
+  const legacy = legacyUserDataPaths().find((path) => existsSync(path))
+  if (!legacy) return
+
+  const destination = app.getPath('userData')
+  const destinationWasFresh = !existsSync(settingsPath())
+  await mkdir(destination, { recursive: true })
+  // Never replace data created by the Oyama build: this makes the migration
+  // safe to retry and preserves any changes made after the rename.
+  await cp(legacy, destination, { recursive: true, force: false, errorOnExist: false, filter: (path) => basename(path) !== 'LOCK' })
+  const browserStorageMigrated = destinationWasFresh || options.replaceBrowserStorage === true
+  if (browserStorageMigrated) await copyLegacyBrowserState(legacy, destination)
+  await writeFile(legacyMigrationMarkerPath(), JSON.stringify({ source: legacy, migratedAt: new Date().toISOString(), browserStorageMigrated }, null, 2), 'utf8')
+}
+
+async function legacyMigrationStatus() {
+  let migratedAt: string | undefined
+  let browserStorageMigrated = false
+  try {
+    const marker = JSON.parse(await readFile(legacyMigrationMarkerPath(), 'utf8')) as { migratedAt?: unknown; browserStorageMigrated?: unknown }
+    if (typeof marker.migratedAt === 'string') migratedAt = marker.migratedAt
+    browserStorageMigrated = marker.browserStorageMigrated === true
+  } catch { /* No completed migration marker yet. */ }
+  return { available: legacyUserDataPaths().some((path) => existsSync(path)), migrated: Boolean(migratedAt), migratedAt, needsBrowserStorageRepair: Boolean(migratedAt) && !browserStorageMigrated }
 }
 
 async function saveLanToken(token: string) {
@@ -684,6 +742,9 @@ function createWindow() {
 }
 
 app.whenReady().then(async () => {
+  const repairBrowserStorage = existsSync(pendingBrowserStorageMigrationPath())
+  await migrateLegacyUserData({ force: repairBrowserStorage, replaceBrowserStorage: repairBrowserStorage })
+  if (repairBrowserStorage) await unlink(pendingBrowserStorageMigrationPath()).catch(() => undefined)
   await startLanServer()
   protocol.handle('minimax-media', async (request) => {
     const requestUrl = new URL(request.url)
@@ -716,6 +777,17 @@ app.whenReady().then(async () => {
     return localMediaResponse(candidate, request)
   })
   ipcMain.handle('settings:get', () => loadSettings())
+  ipcMain.handle('migration:legacy-status', () => legacyMigrationStatus())
+  ipcMain.handle('migration:run', async (_event, replaceBrowserStorage = false) => {
+    if (replaceBrowserStorage === true) {
+      await writeFile(pendingBrowserStorageMigrationPath(), JSON.stringify({ requestedAt: new Date().toISOString() }), 'utf8')
+      app.relaunch()
+      app.exit(0)
+      return { available: true, migrated: false, needsBrowserStorageRepair: false }
+    }
+    await migrateLegacyUserData({ force: true, replaceBrowserStorage: replaceBrowserStorage === true })
+    return legacyMigrationStatus()
+  })
   ipcMain.handle('system:gpu-telemetry', () => readGpuTelemetry())
   ipcMain.handle('window:set-always-on-top', (event, enabled: boolean) => {
     const target = BrowserWindow.fromWebContents(event.sender)
@@ -927,7 +999,7 @@ app.whenReady().then(async () => {
     const data = await comfyFetch(url, provider === 'lmstudio' ? lmStudioPath(url, '/chat/completions') : '/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(provider === 'lmstudio' ? { model, messages: [{ role: 'user', content: images.length ? [{ type: 'text', text: prompt }, ...images.map((image) => ({ type: 'image_url', image_url: { url: `data:${image.mime};base64,${image.base64}` } }))] : prompt }], stream: false, response_format: { type: 'json_schema', json_schema: { name: 'minimax_studio_response', strict: true, schema } }, temperature: 0.2, max_tokens: 6000 } : {
+      body: JSON.stringify(provider === 'lmstudio' ? { model, messages: [{ role: 'user', content: images.length ? [{ type: 'text', text: prompt }, ...images.map((image) => ({ type: 'image_url', image_url: { url: `data:${image.mime};base64,${image.base64}` } }))] : prompt }], stream: false, response_format: { type: 'json_schema', json_schema: { name: 'oyama_ai_video_studio_response', strict: true, schema } }, temperature: 0.2, max_tokens: 6000 } : {
         model,
         messages: [{ role: 'user', content: prompt, ...(images.length ? { images: images.map((image) => image.base64) } : {}) }],
         stream: false,
@@ -953,7 +1025,7 @@ app.whenReady().then(async () => {
   })
   ipcMain.handle('video:frame', async (_event, source: string, position: number | 'last', outputDirectory: string, ffmpegPath: string) => {
     const input = await resolveVideoSource(source)
-    const framesDirectory = join(outputDirectory, 'MiniMax Studio Frames')
+    const framesDirectory = join(outputDirectory, 'Oyama AI Video Studio Frames')
     await mkdir(framesDirectory, { recursive: true })
     const label = position === 'last' ? 'last' : `at_${Math.max(0, position).toFixed(2).replace('.', '-')}`
     const name = `frame_${label}_${Date.now()}.png`
@@ -969,7 +1041,7 @@ app.whenReady().then(async () => {
       throw new Error('Choose between 1 and 100 valid frame bookmarks.')
     }
     const input = await resolveVideoSource(source)
-    const framesDirectory = join(outputDirectory, 'MiniMax Studio Frames')
+    const framesDirectory = join(outputDirectory, 'Oyama AI Video Studio Frames')
     await mkdir(framesDirectory, { recursive: true })
     const batchId = Date.now()
     const outputs: Array<{ path: string; name: string }> = []
@@ -993,7 +1065,7 @@ app.whenReady().then(async () => {
     if (!Number.isFinite(from) || !Number.isFinite(to) || from < 0 || length < 2 || length > 15) {
       throw new Error('Reference clips must be between 2 and 15 seconds long.')
     }
-    const directory = join(outputDirectory, 'MiniMax Studio Reference Clips')
+    const directory = join(outputDirectory, 'Oyama AI Video Studio Reference Clips')
     await mkdir(directory, { recursive: true })
     const name = `Reference_Clip_${Date.now()}.mp4`
     const output = join(directory, name)
@@ -1045,7 +1117,7 @@ app.whenReady().then(async () => {
     if (!executable) throw new Error('RIFE is not installed. Install it from the Clip Editor first.')
     const input = await resolveVideoSource(source)
     const id = String(Date.now())
-    const working = join(outputDirectory, 'MiniMax Studio RIFE', id)
+    const working = join(outputDirectory, 'Oyama AI Video Studio RIFE', id)
     const frames = join(working, 'frames')
     const interpolated = join(working, 'interpolated')
     await mkdir(frames, { recursive: true }); await mkdir(interpolated, { recursive: true })
@@ -1053,7 +1125,7 @@ app.whenReady().then(async () => {
     const frameCount = (await readdir(frames)).filter((file) => /\.png$/i.test(file)).length
     if (frameCount < 2) throw new Error('RIFE needs a clip with at least two decoded frames.')
     await runTool(executable, ['-i', frames, '-o', interpolated, '-n', String(frameCount * 2 - 1), '-m', join(dirname(executable), 'models', 'rife-v4.6')], 'RIFE optical-flow interpolation')
-    const outputRoot = join(outputDirectory, 'MiniMax Studio RIFE')
+    const outputRoot = join(outputDirectory, 'Oyama AI Video Studio RIFE')
     await mkdir(outputRoot, { recursive: true })
     const output = join(outputRoot, `RIFE_${mode === 'slow-motion' ? 'Cinematic_Slow_Motion' : '48fps'}_${id}.mp4`)
     const outputFps = mode === 'slow-motion' ? '24' : '48'
@@ -1072,7 +1144,7 @@ app.whenReady().then(async () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
 }).catch((error) => {
-  dialog.showErrorBox('MiniMax Studio failed to start', `Startup failed before the window could open:\n\n${error instanceof Error ? error.stack ?? error.message : String(error)}\n\nThe application will close.`)
+  dialog.showErrorBox('Oyama AI Video Studio failed to start', `Startup failed before the window could open:\n\n${error instanceof Error ? error.stack ?? error.message : String(error)}\n\nThe application will close.`)
   app.quit()
 })
 

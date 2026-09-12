@@ -15,4 +15,4 @@ const nextVersion = `${major}.${minor}.${Number(patch) + 1}`
 packageJson.version = nextVersion
 
 fs.writeFileSync(packagePath, `${JSON.stringify(packageJson, null, 2)}\n`)
-console.log(`Building MiniMax Studio ${nextVersion}`)
+console.log(`Building Oyama AI Video Studio ${nextVersion}`)

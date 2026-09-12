@@ -126,7 +126,7 @@ export function FrameBookmarkStudio({ initialVideo, videos, settings, onClose, o
         const index = pending.findIndex((bookmark) => bookmark.id === item.id)
         return index >= 0 && frames[index] ? { ...item, frame: frames[index] } : item
       }) }))
-      onNotice('success', `${frames.length} bookmarked frame${frames.length === 1 ? '' : 's'} saved to MiniMax Studio Frames.`)
+      onNotice('success', `${frames.length} bookmarked frame${frames.length === 1 ? '' : 's'} saved to Oyama AI Video Studio Frames.`)
     } catch (error) { onNotice('error', error instanceof Error ? error.message : String(error)) }
     finally { setBusy(null) }
   }
@@ -154,7 +154,7 @@ export function FrameBookmarkStudio({ initialVideo, videos, settings, onClose, o
         </div>
         <section className="saved-frame-library"><header><span><strong>Saved start frames</strong><small>{savedFrames.length} reusable still{savedFrames.length === 1 ? '' : 's'} across all bookmarked clips</small></span><button className="secondary-button" onClick={() => void window.minimax.showOutput(settings.outputDirectory)}><FolderOpen size={14} />Open output folder</button></header>{savedFrames.length === 0 ? <div className="saved-frame-empty"><ImageIcon size={20} /><span>Extract a bookmark to add it to this reusable frame shelf.</span></div> : <div>{savedFrames.map(({ project, bookmark, frame }) => <article key={`${project.id}-${bookmark.id}`}><img src={frame.preview} alt={`${bookmark.label} from ${project.name}`} /><div><strong title={bookmark.label}>{bookmark.label}</strong><small title={project.name}>{project.name} · {timecode(bookmark.time)}</small></div><button onClick={() => onUseLtx(frame)}><ImageIcon size={14} />Use in LTX 2.5</button></article>)}</div>}</section>
       </div>
-      <footer><span><Check size={14} />Extracted PNG files remain in MiniMax Studio Frames even if a bookmark is removed.</span><button className="secondary-button" onClick={onClose}>Done</button></footer>
+      <footer><span><Check size={14} />Extracted PNG files remain in Oyama AI Video Studio Frames even if a bookmark is removed.</span><button className="secondary-button" onClick={onClose}>Done</button></footer>
     </section>
   </div>
 }

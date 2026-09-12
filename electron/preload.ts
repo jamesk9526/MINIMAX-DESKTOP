@@ -7,6 +7,8 @@ contextBridge.exposeInMainWorld('minimax', {
   saveComfyOutputImage: (url: string, file: unknown, outputDirectory: string) => ipcRenderer.invoke('comfy:save-output-image', url, file, outputDirectory),
   saveStillImage: (url: string, file: unknown, outputDirectory: string) => ipcRenderer.invoke('comfy:save-still-image', url, file, outputDirectory),
   getSettings: () => ipcRenderer.invoke('settings:get'),
+  getLegacyMigrationStatus: () => ipcRenderer.invoke('migration:legacy-status'),
+  migrateLegacyData: (replaceBrowserStorage = false) => ipcRenderer.invoke('migration:run', replaceBrowserStorage),
   getGpuTelemetry: () => ipcRenderer.invoke('system:gpu-telemetry'),
   saveSettings: (settings: unknown) => ipcRenderer.invoke('settings:save', settings),
   exportWorkflowJson: (suggestedName: string, workflow: unknown) => ipcRenderer.invoke('workflow:export-json', suggestedName, workflow),

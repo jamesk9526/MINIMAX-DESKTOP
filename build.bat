@@ -10,7 +10,7 @@ if errorlevel 1 (
   exit /b 1
 )
 
-echo Building and packaging MiniMax Studio for Windows...
+echo Building and packaging Oyama AI Video Studio for Windows...
 call pnpm package:win
 if errorlevel 1 (
   echo Windows packaging failed.

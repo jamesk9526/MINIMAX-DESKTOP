@@ -132,11 +132,26 @@ export type MovieShot = {
   referenceImages?: MediaFile[]
   referenceVideos?: MediaFile[]
   referenceAudios?: MediaFile[]
-  stage: 'planned' | 'ready' | 'rendered' | 'approved'
+  /** Runner-owned production state. `rendered` is retained only for older saved projects. */
+  stage: 'planned' | 'ready' | 'rendering' | 'rendered' | 'review' | 'approved' | 'locked'
   outputUrl?: string
   renderedAt?: number
+  renderJobId?: string
 }
-export type MovieScene = { id: string; title: string; summary: string; locationId: string; transition: 'connected' | 'cut'; shots: MovieShot[] }
+export type MovieScene = {
+  id: string
+  title: string
+  summary: string
+  locationId: string
+  transition: 'connected' | 'cut'
+  shots: MovieShot[]
+  stage?: 'planned' | 'ready' | 'rendering' | 'review' | 'approved' | 'locked'
+  previewUrl?: string
+  continuityFrame?: MediaFile
+  continuityState?: string
+  approvedAt?: number
+  lockedAt?: number
+}
 export type MovieProject = {
   id: string
   title: string
@@ -150,6 +165,8 @@ export type MovieProject = {
   visualStyle: string
   quality: 'preview' | 'balanced' | 'maximum'
   reviewGate: 'shot' | 'scene' | 'batch'
+  autoContinueCleanScenes?: boolean
+  productionSettings?: { resolution: string; turbo: 'off' | '4' | '8'; steps: number }
   story: string
   visualRules: string
   characters: MovieCharacter[]
@@ -371,6 +388,8 @@ export type DesktopApi = {
   saveComfyOutputImage(url: string, file: { filename: string; subfolder?: string; type?: string }, outputDirectory: string): Promise<{ path: string; name: string }>
   saveStillImage(url: string, file: { filename: string; subfolder?: string; type?: string }, outputDirectory: string): Promise<{ path: string; name: string }>
   getSettings(): Promise<AppSettings>
+  getLegacyMigrationStatus(): Promise<{ available: boolean; migrated: boolean; migratedAt?: string; needsBrowserStorageRepair: boolean }>
+  migrateLegacyData(replaceBrowserStorage?: boolean): Promise<{ available: boolean; migrated: boolean; migratedAt?: string; needsBrowserStorageRepair: boolean }>
   getGpuTelemetry(): Promise<GpuTelemetry>
   saveSettings(settings: AppSettings): Promise<AppSettings>
   exportWorkflowJson(suggestedName: string, workflow: unknown): Promise<string | null>

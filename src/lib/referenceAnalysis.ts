@@ -14,7 +14,7 @@ const fieldInstructions: Record<ReferenceAnalysisKind, string> = {
 export async function analyzeReferenceImage(settings: AppSettings, imagePath: string, kind: ReferenceAnalysisKind) {
   const llm = resolveLlmConnection(settings)
   if (!llm.model.trim()) throw new Error(`Choose a local vision-capable ${llm.label} model in Settings to analyze existing images.`)
-  const prompt = `Analyze this existing ${kind} reference for MiniMax Studio. ${fieldInstructions[kind]} Return one strict JSON object only. Every value must be a concise plain string; use an empty string when a field cannot be determined. Do not use Markdown, commentary, arrays, or extra keys.`
+  const prompt = `Analyze this existing ${kind} reference for Oyama AI Video Studio. ${fieldInstructions[kind]} Return one strict JSON object only. Every value must be a concise plain string; use an empty string when a field cannot be determined. Do not use Markdown, commentary, arrays, or extra keys.`
   const response = await window.minimax.generateWithOllamaVision(llm.url, llm.model, prompt, [imagePath], llm.provider)
   const start = response.indexOf('{')
   const end = response.lastIndexOf('}')

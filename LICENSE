@@ -1,0 +1,79 @@
+OYAMA AI VIDEO STUDIO PERSONAL-USE LICENSE
+
+Copyright (c) 2026 James Knox. All rights reserved.
+
+1. Scope
+
+This license applies only to the original source code, user interface assets,
+documentation, and other materials in this repository that are owned by James
+Knox (the “Software”). It does not apply to model weights, datasets, model
+cards, third-party packages, fonts, media, trademarks, or other materials that
+are supplied under separate terms.
+
+2. Personal-use permission
+
+Subject to this license, James Knox grants an individual user a revocable,
+non-exclusive, non-transferable, personal-use license to use, copy, and modify
+the Software for that user’s own private, non-commercial purposes. You may
+create and keep private modified versions for personal use.
+
+3. Commercial restrictions
+
+Except with prior written permission from James Knox, you may not sell, rent,
+lease, sublicense, commercially distribute, commercially host, monetize, or
+otherwise commercially exploit the Software or a modified version of it. You
+may not charge for access to it, bundle it with a paid product or service, or
+represent it as your own commercial product.
+
+Commercial rights may be granted only by James Knox or through
+jamesnox.com under a separate written agreement. No other person receives a
+right to sell or commercially distribute the Software under this license.
+
+4. Redistribution
+
+You may share an unmodified copy of the Software solely for another person's
+personal, non-commercial use, provided that you include this license and all
+applicable notices. You may not distribute a modified version without prior
+written permission from James Knox.
+
+5. Third-party terms and models
+
+You are solely responsible for obtaining and complying with every license,
+acceptable-use policy, attribution requirement, export restriction, and other
+term that applies to any model, dataset, service, package, or content you use
+with the Software. This license grants no rights in MiniMax, ComfyUI, model
+weights, or any third-party material, and does not alter their respective
+licenses or terms.
+
+6. Trademarks and affiliation
+
+“MiniMax,” “MiniMax H3,” “ComfyUI,” and any other third-party names and marks
+are the property of their respective owners. References to those marks describe
+compatibility only. This license grants no permission to use any third-party
+trademark, logo, trade dress, or brand name, and does not imply endorsement,
+partnership, sponsorship, or affiliation.
+
+7. Notices
+
+You may not remove or alter copyright, license, attribution, trademark, or
+proprietary-rights notices in the Software.
+
+8. Termination
+
+This license terminates automatically if you violate its terms. Upon
+termination, you must stop using and distributing the Software and destroy all
+copies under your control, except where retention is required by law.
+
+9. Disclaimer and limitation of liability
+
+THE SOFTWARE IS PROVIDED “AS IS,” WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+PURPOSE, TITLE, OR NON-INFRINGEMENT. TO THE MAXIMUM EXTENT PERMITTED BY LAW,
+JAMES KNOX WILL NOT BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY
+ARISING FROM OR RELATED TO THE SOFTWARE OR ITS USE.
+
+10. Governing law
+
+This license is governed by the law applicable to James Knox’s principal place
+of business, without regard to conflict-of-law rules, unless applicable law
+requires otherwise.

@@ -337,8 +337,9 @@ function recordMovieOutput(link: MovieLink | undefined, outputUrl: string) {
   if (!link) return
   try {
     const projects = JSON.parse(localStorage.getItem('minimax.movie-projects') ?? '[]') as MovieProject[]
-    const next = projects.map((project) => project.id !== link.projectId ? project : { ...project, updatedAt: Date.now(), scenes: project.scenes.map((scene) => scene.id !== link.sceneId ? scene : { ...scene, shots: scene.shots.map((shot) => shot.id !== link.shotId ? shot : { ...shot, outputUrl, renderedAt: Date.now(), stage: 'rendered' as const }) }) })
+    const next = projects.map((project) => project.id !== link.projectId ? project : { ...project, updatedAt: Date.now(), scenes: project.scenes.map((scene) => scene.id !== link.sceneId ? scene : { ...scene, stage: 'rendering' as const, shots: scene.shots.map((shot) => shot.id !== link.shotId ? shot : { ...shot, outputUrl, renderedAt: Date.now(), stage: 'review' as const }) }) })
     localStorage.setItem('minimax.movie-projects', JSON.stringify(next))
+    window.dispatchEvent(new CustomEvent('minimax-movie-production-updated'))
   } catch { /* Keep the completed generation even if legacy movie data cannot be updated. */ }
 }
 
@@ -578,6 +579,7 @@ function resolveRenderReferenceImages(files: MediaFile[], bindings: MovieReferen
 }
 
 function App() {
+  const legacyMigrationDismissalKey = 'oyama.legacy-migration-banner-dismissed.v1'
   const persisted = useMemo(readWorkspace, [])
   const [view, setView] = useState<View>('create')
   const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth > 680)
@@ -640,6 +642,7 @@ function App() {
   const [activeJobId, setActiveJobId] = useState<string | null>(persisted.activeJobId)
   const [runtimeNow, setRuntimeNow] = useState(() => Date.now())
   const [movieHandoff, setMovieHandoff] = useState<MovieLink | null>(persisted.movieHandoff)
+  const [pendingMovieAutoRender, setPendingMovieAutoRender] = useState(false)
   const [characterHandoff, setCharacterHandoff] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [stillSubmitting, setStillSubmitting] = useState(false)
@@ -650,6 +653,9 @@ function App() {
   const cancellationRequests = useRef(new Set<string>())
   const mediaHydrated = useRef(false)
   const [notice, setNotice] = useState<{ tone: 'error' | 'success' | 'neutral'; text: string } | null>(null)
+  const [legacyMigration, setLegacyMigration] = useState<{ available: boolean; migrated: boolean; migratedAt?: string; needsBrowserStorageRepair: boolean } | null>(null)
+  const [legacyMigrationRunning, setLegacyMigrationRunning] = useState(false)
+  const [legacyMigrationDismissed, setLegacyMigrationDismissed] = useState(() => localStorage.getItem(legacyMigrationDismissalKey) === 'true')
   const [ollamaModels, setOllamaModels] = useState<OllamaModel[]>([])
   const activeLlmProvider = useRef<AppSettings['llmProvider'] | null>(null)
   const [promptSuggestion, setPromptSuggestion] = useState('')
@@ -779,6 +785,10 @@ function App() {
       void Promise.all([scanModels(loaded), checkConnection(loaded.comfyUrl), refreshOllama(loaded)])
     })
   }, [checkConnection, refreshOllama, scanModels])
+
+  useEffect(() => {
+    void window.minimax.getLegacyMigrationStatus().then(setLegacyMigration).catch(() => setLegacyMigration({ available: false, migrated: false, needsBrowserStorageRepair: false }))
+  }, [])
 
   useEffect(() => {
     if (!settings || activeLlmProvider.current === null || activeLlmProvider.current === settings.llmProvider) return
@@ -916,11 +926,15 @@ function App() {
               setJobs((current) => current.map((item) => item.id === job.id ? { ...item, status: 'failed', error: `The still rendered, but could not be saved locally: ${error instanceof Error ? error.message : String(error)}` } : item))
             }
           } else if (outputUrl && terminalState === 'completed') {
-            recordMovieOutput(job.movieLink, outputUrl)
             const outputFile = extractOutputFile(history, promptId, mediaType)
             // Resolve the exact output reported by ComfyUI. Never credit a
             // concurrent render merely because it is the newest disk file.
             const localOutput = outputFile ? await window.minimax.resolveOutput(settings.outputDirectory, outputFile) : null
+            // Movie continuity needs a local file, not ComfyUI's /view URL.
+            // Store a playable local URL on the planner while retaining the
+            // exact filesystem path on the job for frame extraction.
+            const localUrl = localOutput ? await window.minimax.mediaUrl(localOutput) : outputUrl
+            recordMovieOutput(job.movieLink, localUrl)
             let extractionError: string | null = null
             if (job.characterProjectId) {
               recordCharacterTurntable(job.characterProjectId, localOutput ?? outputUrl)
@@ -930,16 +944,17 @@ function App() {
               if (localOutput) extractionError = await extractAutomatedReferenceSet('location', job.locationProjectId, localOutput, job.duration, settings)
             }
             if (extractionError) setNotice({ tone: 'error', text: `The video rendered, but its reference frames could not be extracted: ${extractionError}` })
-            setJobs((current) => current.map((item) => item.id === job.id ? { ...item, status: 'completed', progress: 100, renderDurationMs: Date.now() - item.createdAt, outputUrl, localOutputPath: localOutput ?? undefined } : item))
+            setJobs((current) => current.map((item) => item.id === job.id ? { ...item, status: 'completed', progress: 100, renderDurationMs: Date.now() - item.createdAt, outputUrl: localUrl, localOutputPath: localOutput ?? undefined } : item))
           } else if (terminalState === 'completed') {
             const outputFile = extractOutputFile(history, promptId, mediaType)
             const localOutput = outputFile ? await window.minimax.resolveOutput(settings.outputDirectory, outputFile) : null
-            if (localOutput) recordMovieOutput(job.movieLink, localOutput)
+            const localUrl = localOutput ? await window.minimax.mediaUrl(localOutput) : null
+            if (localUrl) recordMovieOutput(job.movieLink, localUrl)
             if (localOutput) recordCharacterTurntable(job.characterProjectId, localOutput)
             if (localOutput) recordLocationWalkthrough(job.locationProjectId, localOutput)
             const extractionError = localOutput && job.characterProjectId ? await extractAutomatedReferenceSet('character', job.characterProjectId, localOutput, job.duration, settings) : localOutput && job.locationProjectId ? await extractAutomatedReferenceSet('location', job.locationProjectId, localOutput, job.duration, settings) : null
             if (extractionError) setNotice({ tone: 'error', text: `The video rendered, but its reference frames could not be extracted: ${extractionError}` })
-            setJobs((current) => current.map((item) => item.id === job.id ? localOutput ? { ...item, status: 'completed', progress: 100, renderDurationMs: Date.now() - item.createdAt, outputUrl: localOutput, localOutputPath: localOutput } : { ...item, status: 'failed', progress: 100, renderDurationMs: Date.now() - item.createdAt, error: 'ComfyUI completed this prompt, but no matching output was found. Check the output folder and ComfyUI history.' } : item))
+            setJobs((current) => current.map((item) => item.id === job.id ? localOutput && localUrl ? { ...item, status: 'completed', progress: 100, renderDurationMs: Date.now() - item.createdAt, outputUrl: localUrl, localOutputPath: localOutput } : { ...item, status: 'failed', progress: 100, renderDurationMs: Date.now() - item.createdAt, error: 'ComfyUI completed this prompt, but no matching output was found. Check the output folder and ComfyUI history.' } : item))
           }
         }).catch(() => undefined)
       }
@@ -972,7 +987,16 @@ function App() {
     if (!settings || !job.outputUrl) return
     try {
       const outputFile = outputFileFromUrl(job.outputUrl)
-      const source = job.localOutputPath ?? (outputFile ? await window.minimax.resolveOutput(settings.outputDirectory, outputFile) : null)
+      // Completed local outputs use minimax-media://selected?path=... and do
+      // not have a ComfyUI output descriptor. Recover that path before trying
+      // the older descriptor-based lookup so Continue exactly works after a
+      // restart and for jobs saved by the runner.
+      let mediaPath: string | null = null
+      try {
+        const media = new URL(job.outputUrl)
+        if (media.protocol === 'minimax-media:' && media.hostname === 'selected') mediaPath = media.searchParams.get('path')
+      } catch { /* outputUrl may be a plain ComfyUI URL */ }
+      const source = job.localOutputPath ?? mediaPath ?? (outputFile ? await window.minimax.resolveOutput(settings.outputDirectory, outputFile) : null)
       if (!source) throw new Error('The completed video file could not be found in the output folder.')
       const extracted = await window.minimax.extractVideoFrame(source, 'last', settings.outputDirectory, settings.ffmpegPath)
       const frame: MediaFile = { ...extracted, name: `Locked continuation frame · ${extracted.name}`, kind: 'image', preview: await window.minimax.mediaUrl(extracted.path) }
@@ -1754,6 +1778,15 @@ function App() {
     }
   }
 
+  // The Movie Planner owns production sequencing. Once it has resolved a shot,
+  // this bridge submits the already-populated Create state on the next React
+  // pass, avoiding the former manual "open, then render" handoff.
+  useEffect(() => {
+    if (!pendingMovieAutoRender || view !== 'create' || submitting || !movieHandoff) return
+    setPendingMovieAutoRender(false)
+    void generate()
+  }, [pendingMovieAutoRender, view, submitting, movieHandoff])
+
   const runH3Diagnostics = async () => {
     if (!settings || diagnosticRunning) return
     if (!status.connected) return setNotice({ tone: 'error', text: 'Connect ComfyUI before running the H3 diagnostic.' })
@@ -1791,7 +1824,30 @@ function App() {
   }
 
   if (!settings) {
-    return <div className="boot"><LoaderCircle className="spin" /><span>Opening MiniMax Studio…</span></div>
+    return <div className="boot"><LoaderCircle className="spin" /><span>Opening Oyama AI Video Studio…</span></div>
+  }
+
+  const runLegacyMigration = async () => {
+    if (legacyMigrationRunning) return
+    const replaceBrowserStorage = legacyMigration?.needsBrowserStorageRepair === true
+    if (replaceBrowserStorage && !window.confirm('Restore the previous MiniMax Studio projects, characters, and workspace state? This replaces Oyama’s current browser-backed workspace data. Settings and output files are not removed. Oyama must then be restarted.')) return
+    setLegacyMigrationRunning(true)
+    try {
+      const result = await window.minimax.migrateLegacyData(replaceBrowserStorage)
+      setLegacyMigration(result)
+      setNotice(result.migrated
+        ? { tone: 'success', text: 'Previous Studio data was imported safely. Restart Oyama to load newly imported browser-backed projects and workspace state.' }
+        : { tone: 'neutral', text: 'No previous MiniMax Studio profile was found to import.' })
+    } catch (error) {
+      setNotice({ tone: 'error', text: `Could not import the previous Studio data: ${error instanceof Error ? error.message : String(error)}` })
+    } finally {
+      setLegacyMigrationRunning(false)
+    }
+  }
+
+  const dismissLegacyMigrationBanner = () => {
+    localStorage.setItem(legacyMigrationDismissalKey, 'true')
+    setLegacyMigrationDismissed(true)
   }
   const llmConnection = resolveLlmConnection(settings)
   const changeCopilotModel = (model: string) => {
@@ -1805,13 +1861,13 @@ function App() {
     <div className={`app-shell ${sidebarOpen ? '' : 'sidebar-collapsed'}`}>
       <header className="titlebar" aria-label="Application title bar">
         <button className="titlebar-mobile-menu" onClick={() => setSidebarOpen(true)} aria-label="Open workspace menu"><Menu size={18} /></button>
-        <div className="titlebar-brand"><span className="brand-mark"><Film size={18} /></span><span><strong>MiniMax Studio</strong><small>Create&nbsp;&nbsp;•&nbsp;&nbsp;Visualize&nbsp;&nbsp;•&nbsp;&nbsp;Tell Stories</small></span></div>
+        <div className="titlebar-brand"><span className="brand-mark"><Film size={18} /></span><span><strong>Oyama AI Video Studio</strong><small>Create&nbsp;&nbsp;•&nbsp;&nbsp;Visualize&nbsp;&nbsp;•&nbsp;&nbsp;Tell Stories</small></span></div>
         <button className="titlebar-search" type="button" onClick={() => setView('library')} title="Search generated media in Library"><Search size={15} /><span>Search assets, projects, or prompts…</span><kbd>Library</kbd></button>
         <div className="titlebar-drag" />
         {(view === 'create' || view === 'ltx25' || view === 'zimage') && <button className="titlebar-action titlebar-reset" onClick={resetCurrentWorkspace} title="Reset prompts, options, media, selections, and the current preview in this workspace"><RotateCcw size={14} />Reset workspace</button>}
         {workspaceProjectScope(view) && <button className="titlebar-action titlebar-projects" onClick={() => setProjectManagerOpen(true)} title="Save, open, and manage full workspace projects"><FolderOpen size={14} /><span>Project: Current workspace</span><ChevronDown size={13} /></button>}
         <button className="titlebar-action titlebar-help" onClick={() => setHelpOpen(true)} title="Show tips for this workspace" aria-label="Show workspace tips"><HelpCircle size={15} />Tips</button>
-        <button className="titlebar-action" onClick={() => { setLanOpen(true); void window.minimax.getLanStatus().then(setLanStatus) }} title="Share MiniMax Studio over your local network"><QrCode size={14} />LAN</button>
+        <button className="titlebar-action" onClick={() => { setLanOpen(true); void window.minimax.getLanStatus().then(setLanStatus) }} title="Share Oyama AI Video Studio over your local network"><QrCode size={14} />LAN</button>
       </header>
 
       {helpOpen && <WorkspaceTips view={view} onClose={() => setHelpOpen(false)} />}
@@ -1852,6 +1908,7 @@ function App() {
       </aside>
 
       <main className="main-area">
+        {!legacyMigrationDismissed && legacyMigration && (legacyMigration.available || legacyMigration.migrated) && <section className="legacy-migration-banner" aria-label="Previous Studio data migration"><div><strong>{legacyMigration.needsBrowserStorageRepair ? 'Restore your previous Studio projects and characters' : legacyMigration.migrated ? 'Previous Studio data is ready in Oyama' : 'Bring your previous Studio data into Oyama'}</strong><span>{legacyMigration.needsBrowserStorageRepair ? 'Settings were imported, but local characters, projects, and workspace state need one repair import. Open Settings to restore them.' : legacyMigration.migrated ? 'Your prior local profile was copied safely. You can rerun the import from Settings if you need to recover files added later.' : 'Import settings, saved intents, local projects, LAN pairing, and downloaded tools without replacing Oyama files.'}</span></div><div className="legacy-migration-banner-actions"><button type="button" className="secondary-button" onClick={() => setView('settings')}>Open Settings</button><button type="button" className="icon-button" onClick={dismissLegacyMigrationBanner} aria-label="Dismiss previous Studio migration notice" title="Dismiss"><X size={16} /></button></div></section>}
         {notice && <Notice tone={notice.tone} text={notice.text} onClose={() => setNotice(null)} />}
         <div hidden={view !== 'create'}>
           <CreateView key={`create-${createResetKey}`}
@@ -2021,14 +2078,15 @@ function App() {
           const clarityDirection = 'Maintain crisp, sharp frames with a fast shutter and slow stabilized camera movement. No motion blur, temporal smearing, ghosting, rolling-shutter distortion, speed ramps, whip pans, or rapid camera movement.'
           return generateLtx({ mode: 'image', prompt: `${walkthroughDirection} Location description: ${locationProfile} Camera language: ${cameraLanguage} Image clarity: ${clarityDirection} No cuts, no teleporting, no layout changes, no duplicated objects, no people as focal subjects, no dialogue, no text, no logos.`, width: 1344, height: 768, duration: Math.max(5, Math.min(20, options?.duration ?? 10)), preset: 'quality', seed: Math.floor(Math.random() * 1_000_000_000), filenamePrefix: 'MiniMax_location_walkthrough' }, firstFrame, { locationProjectId: project.id })
         }} />}
-        {view === 'movie' && <MoviePlanner settings={settings} ollamaAvailable={ollamaModels.length > 0} ollamaModel={llmConnection.model} onNotice={(tone, text) => setNotice({ tone, text })} onOpenShot={async (shot: MovieShot, aspectRatio: MovieProject['aspectRatio'], resolved: ResolvedMovieShot, context: { projectId: string; sceneId: string; continuationSource?: string }) => {
+        {view === 'movie' && <MoviePlanner settings={settings} jobs={jobs} ollamaAvailable={ollamaModels.length > 0} ollamaModel={llmConnection.model} onNotice={(tone, text) => setNotice({ tone, text })} onOpenShot={async (shot: MovieShot, aspectRatio: MovieProject['aspectRatio'], resolved: ResolvedMovieShot, context: { projectId: string; sceneId: string; continuationSource?: string; autoStart?: boolean; renderSettings?: MovieProject['productionSettings'] }) => {
           setCharacterHandoff(null)
           setSelectedReferenceCharacterIds([])
           setSelectedReferenceLocationIds([])
           setPrompt(resolved.compiledPrompt)
           setDuration(Math.max(2, Math.min(15, shot.duration)))
           setMode(resolved.effectiveMode)
-          setResolution(aspectRatio === '9:16' ? '768x1344' : aspectRatio === '1:1' ? '768x768' : '1344x768')
+          setResolution(context.renderSettings?.resolution ?? (aspectRatio === '9:16' ? '768x1344' : aspectRatio === '1:1' ? '768x768' : '1344x768'))
+          if (context.renderSettings) { setTurbo(context.renderSettings.turbo); setSteps(context.renderSettings.steps) }
           let inheritedFrame: MediaFile | null = null
           if (context.continuationSource) {
             try {
@@ -2043,6 +2101,7 @@ function App() {
           const resolvedImages = resolved.references.map((binding) => binding.purpose === 'continuity' && inheritedFrame ? inheritedFrame : binding.file)
           setFirstFrame(resolved.effectiveMode === 'image' ? inheritedFrame : null); setLastFrame(null); setReferenceImages(resolved.effectiveMode === 'reference' ? resolvedImages : []); setReferenceVideos(resolved.effectiveMode === 'reference' ? shot.referenceVideos ?? [] : []); setReferenceAudios(resolved.effectiveMode === 'reference' ? shot.referenceAudios ?? [] : [])
           setActiveJobId(null); setView('create')
+          setPendingMovieAutoRender(Boolean(context.autoStart))
           const inputNote = resolved.effectiveMode === 'reference' ? ` Loaded ${resolvedImages.length} semantically resolved reference image${resolvedImages.length === 1 ? '' : 's'}.` : inheritedFrame ? ' The previous scene’s last frame was loaded automatically for continuous I2V.' : resolved.effectiveMode === 'image' ? ' Add the approved first frame before rendering.' : resolved.effectiveMode === 'frames' ? ' Add the approved first and last frames before rendering.' : ''
           setNotice({ tone: 'success', text: `${shot.title} loaded into Create.${inputNote}` })
         }} />}
@@ -2055,7 +2114,7 @@ function App() {
           setActiveJobId(null); setView('create')
           setNotice({ tone: 'success', text: target === 'i2v' ? `Frame loaded from ${clip.name} as the I2V first frame. The new render will remain a separate video until you add and export it in Clip Editor.` : 'Extracted frame loaded into Create.' })
         }} />}
-        {view === 'settings' && <SettingsView settings={settings} setSettings={setSettings} info={info} models={models} h3Report={h3Report} scanning={scanning} status={status} checking={checking} diagnosticRunning={diagnosticRunning} ollamaModels={ollamaModels} onRefreshOllama={() => void refreshOllama(settings)} onScan={() => void scanModels(settings)} onCheck={() => void checkConnection(settings.comfyUrl)} onSave={() => void saveAppSettings()} onApplyDefaults={applyGenerationDefaults} onRunDiagnostics={() => void runH3Diagnostics()} />}
+        {view === 'settings' && <SettingsView settings={settings} setSettings={setSettings} info={info} models={models} h3Report={h3Report} scanning={scanning} status={status} checking={checking} diagnosticRunning={diagnosticRunning} ollamaModels={ollamaModels} legacyMigration={legacyMigration} legacyMigrationRunning={legacyMigrationRunning} onRefreshOllama={() => void refreshOllama(settings)} onScan={() => void scanModels(settings)} onCheck={() => void checkConnection(settings.comfyUrl)} onSave={() => void saveAppSettings()} onApplyDefaults={applyGenerationDefaults} onRunDiagnostics={() => void runH3Diagnostics()} onRunLegacyMigration={() => void runLegacyMigration()} />}
       </main>
       <footer className="status-bar" aria-label="Application status">
         <span className="status-bar-context"><Film size={14} /><strong>{view === 'create' ? `Create · ${mode === 'reference' ? 'Ref2VA' : 'MiniMax H3'}` : workspaceProjectLabel(workspaceProjectScope(view) ?? 'create')}</strong></span>
@@ -2093,10 +2152,10 @@ function LanCompanionDialog({ status, qr, onRotate, onClose }: { status: LanStat
         <div className="lan-instructions"><span className="lan-ready"><Check size={15} />LAN server ready</span><h2>Open on another device</h2><p>Scan the experience you want on a phone, tablet, or computer connected to the same trusted Wi-Fi or LAN.</p></div>
         <div className="lan-share-grid">
           <article className="lan-share-card"><div className="lan-qr">{qr.mobile ? <img src={qr.mobile} alt="QR code for the touch-first mobile MiniMax workspace" /> : <LoaderCircle className="spin" aria-label="Preparing mobile QR code" />}</div><div><strong>Touch-first mobile creation</strong><small>Fast controls for creating and monitoring shots from a phone.</small><label>Mobile address<input readOnly value={status.url} onFocus={(event) => event.currentTarget.select()} /></label></div></article>
-          <article className="lan-share-card"><div className="lan-qr">{qr.desktop ? <img src={qr.desktop} alt="QR code for the complete MiniMax Studio interface" /> : <LoaderCircle className="spin" aria-label="Preparing Studio QR code" />}</div><div><strong>Complete Studio interface</strong><small>Full workspace for desktop or tablet editing and production.</small><label>Studio address<input readOnly value={desktopUrl} onFocus={(event) => event.currentTarget.select()} /></label></div></article>
+          <article className="lan-share-card"><div className="lan-qr">{qr.desktop ? <img src={qr.desktop} alt="QR code for the complete Oyama AI Video Studio interface" /> : <LoaderCircle className="spin" aria-label="Preparing Studio QR code" />}</div><div><strong>Complete Studio interface</strong><small>Full workspace for desktop or tablet editing and production.</small><label>Studio address<input readOnly value={desktopUrl} onFocus={(event) => event.currentTarget.select()} /></label></div></article>
         </div>
         <small className="lan-security-note">The full Studio view shares the interface and browser-local project state. Hardware generation and local-file access remain protected by authenticated LAN services. Windows Firewall may ask to allow private-network access the first time.</small>
-      </div> : <div className="lan-dialog-error"><AlertCircle size={22} /><span><strong>Mobile server unavailable</strong><p>{status.error ?? 'Restart MiniMax Studio, then try again.'}</p></span></div>}
+      </div> : <div className="lan-dialog-error"><AlertCircle size={22} /><span><strong>Mobile server unavailable</strong><p>{status.error ?? 'Restart Oyama AI Video Studio, then try again.'}</p></span></div>}
       <footer><button className="secondary-button" disabled={rotating || !status.running} title="Invalidate previously scanned mobile links" onClick={async () => { if (!window.confirm('Rotate the mobile access link? Previously scanned links will stop working.')) return; setRotating(true); try { await onRotate() } finally { setRotating(false) } }}><RotateCcw size={14} />{rotating ? 'Rotating…' : 'Rotate access link'}</button><button className="primary-button" onClick={onClose}>Done</button></footer>
     </section>
   </div>
@@ -2127,7 +2186,7 @@ function WorkspaceProjectManager({ activeScope, projects, onClose, onSave, onLoa
         <div className="workspace-project-toolbar"><span><strong>Saved projects</strong><small>{projects.length} local project{projects.length === 1 ? '' : 's'}</small></span><label><span>Show</span><select value={filter} onChange={(event) => setFilter(event.target.value as typeof filter)}><option value="all">All workspaces</option><option value="create">MiniMax H3 / Ref2VA</option><option value="ltx25">LTX 2.5</option><option value="zimage">Create Image</option><option value="music">Music</option></select></label></div>
         {visibleProjects.length ? <div className="workspace-project-list">{visibleProjects.map((project) => <article key={project.id}><div><span className="workspace-project-scope">{workspaceProjectLabel(project.scope)}</span><strong>{project.name}</strong><small>{details(project)}</small><small>Updated {new Date(project.updatedAt).toLocaleString()}</small></div><div><button type="button" className="secondary-button" onClick={() => onLoad(project)}>Open</button><button type="button" className="icon-button" aria-label={`Rename ${project.name}`} onClick={() => onRename(project)}><Pencil size={15} /></button><button type="button" className="icon-button danger-icon" aria-label={`Delete ${project.name}`} onClick={() => { if (window.confirm(`Delete project “${project.name}”? This does not delete any source files.`)) onDelete(project) }}><Trash2 size={15} /></button></div></article>)}</div> : <div className="workspace-project-empty"><FolderOpen size={26} /><strong>No projects here yet</strong><span>Save the active workspace to capture its prompt, settings, and references.</span></div>}
       </div>
-      <footer><small>Projects are stored locally in MiniMax Studio. Opening a project never changes its source images, videos, audio, or library assets.</small><button className="secondary-button" onClick={onClose}>Done</button></footer>
+      <footer><small>Projects are stored locally in Oyama AI Video Studio. Opening a project never changes its source images, videos, audio, or library assets.</small><button className="secondary-button" onClick={onClose}>Done</button></footer>
     </section>
   </div>
 }
@@ -2731,7 +2790,7 @@ function JobsView({ title, note, jobs, empty, cancellingIds, onCancel }: { title
   return <div className="standard-page"><div className="page-heading"><div><p className="eyebrow">LOCAL WORKSPACE</p><h1>{title}</h1><p>{note}</p></div></div>{jobs.length === 0 ? <div className="empty-page"><History size={28} /><strong>{empty}</strong><span>New work is saved automatically on this device.</span></div> : <div className="job-list">{jobs.map((job) => { const audio = job.mediaType === 'audio'; const image = job.mediaType === 'image'; return <article className={`job-row ${['running', 'queued'].includes(job.status) ? 'constructing' : ''}`} key={job.id}><div className={`job-thumbnail ${audio ? 'audio' : ''}`}>{job.outputUrl ? audio ? <Music2 /> : image ? <img src={job.outputUrl} alt="Generated reference still" /> : <video src={job.outputUrl} muted /> : job.status === 'running' ? <LoaderCircle className="spin" /> : audio ? <Music2 /> : image ? <ImageIcon /> : <Film />}</div><div className="job-copy"><div><StatusBadge status={job.status} /><span>{new Date(job.createdAt).toLocaleString()}</span></div><strong>{shortPrompt(job.prompt)}</strong><small>{audio ? `ACE-Step · ${job.duration}s · audio` : `${job.width} × ${job.height} · ${image ? 'Ref2VA still' : `${job.duration}s · ${job.mode}`}`}</small><JobExecutionChips job={job} />{job.outputUrl && audio && <audio className="job-audio" src={job.outputUrl} controls preload="metadata" />}{['running', 'queued'].includes(job.status) && <><small className="job-progress-label">{job.progressLabel ?? (job.status === 'queued' ? 'Waiting in queue' : audio ? 'Generating music locally' : image ? 'Generating one reference still' : 'Rendering locally')}{job.queuePosition ? ` · position ${job.queuePosition}` : ''}{job.currentStep !== undefined && job.totalSteps ? ` · ${job.currentStep}/${job.totalSteps}` : ''}</small><div className="progress compact"><i style={{ width: `${job.progress}%` }} /></div></>}{job.error && <p className="job-error">{job.error}</p>}</div><div className="job-actions">{job.outputUrl && <a className="secondary-button" href={job.outputUrl} target="_blank" rel="noreferrer"><ExternalLink size={15} />Open</a>}{['running', 'queued'].includes(job.status) && <button className="danger-button" disabled={cancellingIds.has(job.id)} onClick={() => void onCancel(job)}>{cancellingIds.has(job.id) ? <LoaderCircle size={15} className="spin" /> : <CircleStop size={15} />}{cancellingIds.has(job.id) ? 'Stopping…' : 'Stop'}</button>}</div></article> })}</div>}</div>
 }
 
-function SettingsView({ settings, setSettings, info, models, h3Report, scanning, status, checking, diagnosticRunning, ollamaModels, onRefreshOllama, onScan, onCheck, onSave, onApplyDefaults, onRunDiagnostics }: { settings: AppSettings; setSettings(value: AppSettings): void; info: ObjectInfo; models: ModelFile[]; h3Report: ReturnType<typeof h3StackReport>; scanning: boolean; status: ComfyStatus; checking: boolean; diagnosticRunning: boolean; ollamaModels: OllamaModel[]; onRefreshOllama(): void; onScan(): void; onCheck(): void; onSave(): void; onApplyDefaults(): void; onRunDiagnostics(): void }) {
+function SettingsView({ settings, setSettings, info, models, h3Report, scanning, status, checking, diagnosticRunning, ollamaModels, legacyMigration, legacyMigrationRunning, onRefreshOllama, onScan, onCheck, onSave, onApplyDefaults, onRunDiagnostics, onRunLegacyMigration }: { settings: AppSettings; setSettings(value: AppSettings): void; info: ObjectInfo; models: ModelFile[]; h3Report: ReturnType<typeof h3StackReport>; scanning: boolean; status: ComfyStatus; checking: boolean; diagnosticRunning: boolean; ollamaModels: OllamaModel[]; legacyMigration: { available: boolean; migrated: boolean; migratedAt?: string; needsBrowserStorageRepair: boolean } | null; legacyMigrationRunning: boolean; onRefreshOllama(): void; onScan(): void; onCheck(): void; onSave(): void; onApplyDefaults(): void; onRunDiagnostics(): void; onRunLegacyMigration(): void }) {
   const pathRows: Array<{ kind: ModelKind; label: string; note: string }> = [
     { kind: 'diffusion_models', label: 'Diffusion models', note: 'FL2VA and Ref2VA checkpoints' },
     { kind: 'text_encoders', label: 'Text encoders', note: 'Qwen3-VL MiniMax encoder' },
@@ -2891,7 +2950,7 @@ function SettingsView({ settings, setSettings, info, models, h3Report, scanning,
       <p className="settings-note">{settings.llmProvider === 'lmstudio' ? 'LM Studio is opt-in and restricted to loopback addresses (localhost, 127.0.0.1, or ::1). Start its Local Server, choose a loaded model, then save settings.' : 'Prompts go directly to the local Ollama server. Embedding and cloud-backed models are excluded.'}</p>
     </section>
     <section className="settings-section" id="settings-models"><div className="settings-heading"><div><HardDrive size={19} /><span><strong>Model locations</strong><small>Files are indexed in place and are never moved or copied.</small></span></div><button className="secondary-button" onClick={onScan} disabled={scanning}>{scanning ? <LoaderCircle size={16} className="spin" /> : <RefreshCw size={16} />}{scanning ? 'Scanning…' : 'Rescan'}</button></div><div className="path-table">{pathRows.map((row) => { const count = models.filter((model) => model.kind === row.kind).length; return <div className="path-row" key={row.kind}><div className="path-kind"><Folder size={17} /><span><strong>{row.label}</strong><small>{row.note}</small></span></div><div className="path-input"><input value={settings.paths[row.kind]} onChange={(event) => setSettings({ ...settings, paths: { ...settings.paths, [row.kind]: event.target.value } })} /><button onClick={async () => { const path = await window.minimax.chooseDirectory(settings.paths[row.kind]); if (path) setSettings({ ...settings, paths: { ...settings.paths, [row.kind]: path } }) }} aria-label={`Browse for ${row.label}`}><FolderOpen size={17} /></button></div><span className="file-count">{count} files</span></div>})}</div></section>
-    <section className="settings-section" id="settings-storage"><div className="settings-heading"><div><FolderOpen size={19} /><span><strong>Output & clip tools</strong><small>Completed videos, extracted frames, and editor exports stay local.</small></span></div></div><div className="connection-row"><div className="field-group grow"><label htmlFor="output-path">Output directory</label><input id="output-path" value={settings.outputDirectory} onChange={(event) => setSettings({ ...settings, outputDirectory: event.target.value })} /></div><button className="secondary-button test-button" onClick={async () => { const path = await window.minimax.chooseDirectory(settings.outputDirectory); if (path) setSettings({ ...settings, outputDirectory: path }) }}><FolderOpen size={16} />Browse</button></div><div className="connection-row clip-tool-path"><div className="field-group grow"><label htmlFor="ffmpeg-path">FFmpeg executable</label><input id="ffmpeg-path" value={settings.ffmpegPath} onChange={(event) => setSettings({ ...settings, ffmpegPath: event.target.value })} /></div></div><p className="settings-note">The clip editor uses FFmpeg for frame extraction, trim points, joining, and full-project export.</p><label className="settings-check"><input type="checkbox" checked={settings.blurNsfwLivePreviews} onChange={(event) => setSettings({ ...settings, blurNsfwLivePreviews: event.target.checked })} /><span><strong>Blur sensitive live previews</strong><small>When enabled, the local preview blurs if the render prompt contains explicit-adult wording. Hover or keyboard-focus the preview to reveal it. This never blocks, changes, or uploads a render.</small></span></label></section>
+    <section className="settings-section" id="settings-storage"><div className="settings-heading"><div><FolderOpen size={19} /><span><strong>Output & clip tools</strong><small>Completed videos, extracted frames, and editor exports stay local.</small></span></div></div><div className="connection-row"><div className="field-group grow"><label htmlFor="output-path">Output directory</label><input id="output-path" value={settings.outputDirectory} onChange={(event) => setSettings({ ...settings, outputDirectory: event.target.value })} /></div><button className="secondary-button test-button" onClick={async () => { const path = await window.minimax.chooseDirectory(settings.outputDirectory); if (path) setSettings({ ...settings, outputDirectory: path }) }}><FolderOpen size={16} />Browse</button></div><div className="connection-row clip-tool-path"><div className="field-group grow"><label htmlFor="ffmpeg-path">FFmpeg executable</label><input id="ffmpeg-path" value={settings.ffmpegPath} onChange={(event) => setSettings({ ...settings, ffmpegPath: event.target.value })} /></div></div><p className="settings-note">The clip editor uses FFmpeg for frame extraction, trim points, joining, and full-project export.</p><label className="settings-check"><input type="checkbox" checked={settings.blurNsfwLivePreviews} onChange={(event) => setSettings({ ...settings, blurNsfwLivePreviews: event.target.checked })} /><span><strong>Blur sensitive live previews</strong><small>When enabled, the local preview blurs if the render prompt contains explicit-adult wording. Hover or keyboard-focus the preview to reveal it. This never blocks, changes, or uploads a render.</small></span></label><div className="legacy-migration-settings"><div><strong>Previous Studio data</strong><small>{legacyMigration?.needsBrowserStorageRepair ? 'Restore the previous local characters, projects, and workspace state. This replaces Oyama browser-backed workspace data, then requires a restart.' : legacyMigration?.migrated ? 'The previous MiniMax Studio profile was imported. Run this again only to collect files added to the old app after the first import.' : legacyMigration?.available ? 'Import your previous MiniMax Studio profile into Oyama. Existing Oyama data is never replaced.' : 'No previous MiniMax Studio profile was found on this computer.'}</small></div><button type="button" className="secondary-button" disabled={!legacyMigration?.available || legacyMigrationRunning} onClick={onRunLegacyMigration}>{legacyMigrationRunning ? <LoaderCircle className="spin" size={15} /> : <History size={15} />}{legacyMigrationRunning ? 'Importing…' : legacyMigration?.needsBrowserStorageRepair ? 'Restore projects & characters' : legacyMigration?.migrated ? 'Import missing data again' : 'Import previous data'}</button></div></section>
   </div></div></div>
 }
 

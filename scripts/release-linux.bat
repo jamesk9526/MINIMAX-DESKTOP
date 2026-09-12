@@ -2,7 +2,7 @@
 setlocal
 cd /d "%~dp0.."
 
-echo Building portable MiniMax Studio ZIP for Linux x64...
+echo Building portable Oyama AI Video Studio ZIP for Linux x64...
 call pnpm package:linux
 if errorlevel 1 (
   echo Linux package failed.

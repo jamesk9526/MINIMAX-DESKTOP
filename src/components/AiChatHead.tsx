@@ -23,7 +23,7 @@ const copilotReplySchema = {
 }
 
 const modeCopy: Record<ChatMode, { label: string; placeholder: string; instruction: string }> = {
-  prompt: { label: 'Ask', placeholder: 'Ask about the current prompt or references…', instruction: 'Act as the MiniMax Studio copilot. Answer concisely using the current workspace, reference map, and inspected image content. Identify conflicts or missing continuity anchors and give actionable production guidance.' },
+  prompt: { label: 'Ask', placeholder: 'Ask about the current prompt or references…', instruction: 'Act as the Oyama AI Video Studio copilot. Answer concisely using the current workspace, reference map, and inspected image content. Identify conflicts or missing continuity anchors and give actionable production guidance.' },
   image: { label: 'Image', placeholder: 'Describe or refine the still image…', instruction: 'For a direct still-image creation or edit request, return one complete, polished production-ready Z-Image prompt that follows the latest user request. Preserve unaffected constraints from the current draft, but never let the old draft override a requested change. Do not include motion, sound, timelines, or multiple shots.' },
   video: { label: 'Video', placeholder: 'Describe the action you want added to this shot…', instruction: '' },
 }
@@ -80,9 +80,9 @@ export function AiChatHead({ available, provider, ollamaUrl, ollamaModel, models
 
   const popOut = () => {
     if (popupRef.current && !popupRef.current.closed) { popupRef.current.focus(); return }
-    const popup = window.open('', 'minimax-studio-copilot', 'popup=yes,width=560,height=780,resizable=yes')
+    const popup = window.open('', 'oyama-ai-video-studio-copilot', 'popup=yes,width=560,height=780,resizable=yes')
     if (!popup) return
-    popup.document.title = 'MiniMax Studio copilot'
+    popup.document.title = 'Oyama AI Video Studio copilot'
     popup.document.documentElement.className = 'copilot-popout-document'
     popup.document.head.querySelectorAll('link[rel="stylesheet"], style').forEach((node) => node.remove())
     document.querySelectorAll<HTMLLinkElement | HTMLStyleElement>('link[rel="stylesheet"], style').forEach((node) => {

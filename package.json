@@ -1,8 +1,8 @@
 {
-  "name": "minimax-desktop",
-  "version": "0.12.33",
+  "name": "oyama-ai-video-studio",
+  "version": "0.12.40",
   "private": true,
-  "description": "Local-first MiniMax H3 desktop studio powered by ComfyUI",
+  "description": "Local-first AI video studio powered by ComfyUI",
   "author": {
     "name": "James Knox",
     "email": "contact@jamesnox.com"
@@ -63,8 +63,8 @@
     }
   },
   "build": {
-    "appId": "com.james.minimaxstudio",
-    "productName": "MiniMax Studio",
+    "appId": "com.james.oyamaaivideostudio",
+    "productName": "Oyama AI Video Studio",
     "asar": true,
     "directories": {
       "output": "release",
@@ -85,7 +85,7 @@
         }
       ],
       "icon": "build/icon.png",
-      "artifactName": "MiniMax-Studio-Setup-${version}.${ext}"
+      "artifactName": "Oyama-AI-Video-Studio-Setup-${version}.${ext}"
     },
     "nsis": {
       "oneClick": true,
@@ -93,7 +93,7 @@
       "allowElevation": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "MiniMax Studio",
+      "shortcutName": "Oyama AI Video Studio",
       "deleteAppDataOnUninstall": false
     },
     "linux": {
@@ -120,8 +120,8 @@
       "category": "Graphics",
       "maintainer": "James Knox <contact@jamesnox.com>",
       "synopsis": "Local-first AI filmmaking workstation",
-      "description": "MiniMax Studio is a local-first AI filmmaking workstation powered by ComfyUI.",
-      "artifactName": "MiniMax-Studio-${version}-linux-${arch}.${ext}"
+      "description": "Oyama AI Video Studio is a local-first AI filmmaking workstation powered by ComfyUI.",
+      "artifactName": "Oyama-AI-Video-Studio-${version}-linux-${arch}.${ext}"
     },
     "mac": {
       "target": [
@@ -134,7 +134,7 @@
         }
       ],
       "category": "public.app-category.graphics-design",
-      "artifactName": "MiniMax-Studio-${version}-mac-${arch}.${ext}"
+      "artifactName": "Oyama-AI-Video-Studio-${version}-mac-${arch}.${ext}"
     }
   }
 }

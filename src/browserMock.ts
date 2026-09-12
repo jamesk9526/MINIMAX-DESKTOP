@@ -83,6 +83,8 @@ export function installBrowserMock() {
     saveComfyOutputImage: async () => { throw new Error('Open the desktop app to save generated images.') },
     saveStillImage: async () => { throw new Error('Open the desktop app to save generated stills.') },
     getSettings: async () => current,
+    getLegacyMigrationStatus: async () => ({ available: false, migrated: false, needsBrowserStorageRepair: false }),
+    migrateLegacyData: async () => ({ available: false, migrated: false, needsBrowserStorageRepair: false }),
     getGpuTelemetry: async () => ({ available: true, name: 'Preview GPU', usagePercent: 38, vramPercent: 62, vramUsedMb: 14880, vramTotalMb: 24000 }),
     saveSettings: async (next) => (current = next),
     exportWorkflowJson: async (suggestedName) => `C:\\Users\\James\\Documents\\${suggestedName}`,

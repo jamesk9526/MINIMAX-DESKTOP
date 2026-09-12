@@ -1,7 +1,7 @@
 {
-  "name": "MiniMax Studio Mobile",
-  "short_name": "MiniMax",
-  "description": "Create MiniMax text-to-video and image-to-video generations on your desktop from your phone.",
+  "name": "Oyama AI Video Studio Mobile",
+  "short_name": "Oyama Video",
+  "description": "Create AI text-to-video and image-to-video generations on your desktop from your phone.",
   "start_url": "/?mobile=1",
   "scope": "/",
   "display": "standalone",
