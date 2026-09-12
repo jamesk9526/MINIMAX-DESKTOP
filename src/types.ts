@@ -1,4 +1,4 @@
-export type View = 'create' | 'ltx25' | 'music' | 'zimage' | 'characters' | 'hair' | 'wardrobes' | 'accessories' | 'locations' | 'movie' | 'queue' | 'library' | 'editor' | 'settings'
+export type View = 'create' | 'ltx25' | 'music' | 'zimage' | 'characters' | 'hair' | 'wardrobes' | 'accessories' | 'locations' | 'movie' | 'queue' | 'library' | 'editor' | 'clipmaster' | 'settings'
 export type GenerationMode = 'text' | 'image' | 'frames' | 'reference'
 export type ModelKind = 'diffusion_models' | 'text_encoders' | 'vae' | 'loras' | 'vae_approx' | 'clip_vision'
 export type MediaKind = 'image' | 'video' | 'audio'
@@ -54,6 +54,7 @@ export type AppSettings = {
   modelRoot: string
   paths: Record<ModelKind, string>
   outputDirectory: string
+  clipMasterOutputDirectory: string
   ffmpegPath: string
   uiScale: number
   attentionBackend: AttentionBackendPreference
@@ -132,9 +133,10 @@ export type MovieShot = {
   referenceImages?: MediaFile[]
   referenceVideos?: MediaFile[]
   referenceAudios?: MediaFile[]
-  /** Runner-owned production state. `rendered` is retained only for older saved projects. */
-  stage: 'planned' | 'ready' | 'rendering' | 'rendered' | 'review' | 'approved' | 'locked'
+  stage: 'planned' | 'ready' | 'rendering' | 'review' | 'approved' | 'locked'
   outputUrl?: string
+  /** Exact local file retained for continuation, replacement, and assembly after restart. */
+  outputPath?: string
   renderedAt?: number
   renderJobId?: string
 }
@@ -163,10 +165,8 @@ export type MovieProject = {
   aspectRatio: '16:9' | '9:16' | '1:1'
   genre: string
   visualStyle: string
-  quality: 'preview' | 'balanced' | 'maximum'
-  reviewGate: 'shot' | 'scene' | 'batch'
   autoContinueCleanScenes?: boolean
-  productionSettings?: { resolution: string; turbo: 'off' | '4' | '8'; steps: number }
+  productionSettings?: { resolution: string; turbo: 'off' | '4' | '8'; steps: number; seed?: number; noDialogue?: boolean; naturalMovement?: boolean }
   story: string
   visualRules: string
   characters: MovieCharacter[]
@@ -182,13 +182,22 @@ export type ModelFile = {
   bytes: number
 }
 
+export type ReferenceImageType = 'master' | 'face' | 'full-body' | 'three-quarter' | 'profile' | 'back' | 'detail' | 'other'
+export type ReferenceHandoffRole = 'subject' | 'wardrobe' | 'prop' | 'location' | 'composition' | 'lighting-style'
+export type ReferenceRetention = 'preserve' | 'guide'
+
 export type MediaFile = {
   path: string
   name: string
   kind: MediaKind
   preview?: string
-  crop?: { x: number; y: number; zoom: number; fit: 'crop' | 'contain' }
+  crop?: { x: number; y: number; zoom: number; fit: 'crop' | 'contain'; background?: 'auto' | 'smart' | 'neutral' }
   clip?: { sourcePath: string; sourceName: string; start: number; end: number }
+  /** The visual coverage this image provides when it is used as a character reference. */
+  referenceType?: ReferenceImageType
+  /** How a standalone image should be described and retained during reference handoff. */
+  referenceRole?: ReferenceHandoffRole
+  referenceRetention?: ReferenceRetention
 }
 
 export type ModelSelection = {
@@ -405,9 +414,14 @@ export type DesktopApi = {
   uploadInput(url: string, filePath: string): Promise<UploadedFile>
   fileDataUrl(filePath: string): Promise<string>
   mediaUrl(filePath: string): Promise<string>
+  validateMediaFiles(files: Array<Pick<MediaFile, 'path' | 'kind'>>): Promise<Array<{ path: string; valid: boolean; reason?: string }>>
   extractVideoFrame(source: string, position: number | 'last', outputDirectory: string, ffmpegPath: string): Promise<{ path: string; name: string }>
   extractVideoFrames(source: string, positions: number[], outputDirectory: string, ffmpegPath: string): Promise<Array<{ path: string; name: string }>>
   trimVideo(source: string, start: number, end: number, outputDirectory: string, ffmpegPath: string): Promise<{ path: string; name: string }>
+  getVideoMetadata(source: string, ffmpegPath: string): Promise<{ duration: number; fps: number; frameCount: number; width: number; height: number }>
+  extractClipMasterFrames(source: string, frames: Array<{ index: number; role: 'start' | 'end' | 'frame' }>, outputDirectory: string, ffmpegPath: string, sourceName: string): Promise<{ folder: string; files: Array<{ path: string; name: string; index: number; role: 'start' | 'end' | 'frame' }> }>
+  chooseClipMasterExportPath(outputDirectory: string, sourceName: string): Promise<string | null>
+  trimClipMaster(source: string, startFrame: number, endFrame: number, fps: number, outputPath: string, ffmpegPath: string): Promise<{ path: string; name: string; url: string; folder: string; frameCount: number; duration: number }>
   joinVideos(clips: Array<Pick<ClipItem, 'source' | 'start' | 'end'>>, outputDirectory: string, ffmpegPath: string): Promise<{ path: string; url: string }>
   getRifeStatus(): Promise<{ installed: boolean; executable?: string; error?: string }>
   installRife(): Promise<{ installed: boolean; executable?: string; error?: string }>

@@ -51,6 +51,7 @@ type AppSettings = {
   modelRoot: string
   paths: Record<ModelKind, string>
   outputDirectory: string
+  clipMasterOutputDirectory: string
   ffmpegPath: string
   uiScale: number
   attentionBackend: 'automatic' | 'kitchen' | 'sage' | 'native'
@@ -164,6 +165,7 @@ function defaultSettings(): AppSettings {
     modelRoot: root,
     paths: Object.fromEntries(modelKinds.map((kind) => [kind, join(root, kind)])) as Record<ModelKind, string>,
     outputDirectory: join(app.getPath('documents'), 'ComfyUI', 'output'),
+    clipMasterOutputDirectory: join(app.getPath('documents'), 'ComfyUI', 'output', 'video'),
     ffmpegPath: existsSync('C:\\FFMPEG\\bin\\ffmpeg.exe') ? 'C:\\FFMPEG\\bin\\ffmpeg.exe' : 'ffmpeg',
     uiScale: 100,
     attentionBackend: 'automatic',
@@ -329,7 +331,9 @@ async function loadSettings(): Promise<AppSettings> {
       return { id: typeof preset.id === 'string' ? preset.id : randomUUID(), name: preset.name.trim().slice(0, 60), values, createdAt: Number(preset.createdAt) || Date.now(), updatedAt: Number(preset.updatedAt) || Date.now() }
     }) : []
     const attentionBackend = raw.attentionBackend === 'kitchen' || raw.attentionBackend === 'sage' || raw.attentionBackend === 'native' ? raw.attentionBackend : 'automatic'
-    return { ...defaults, ...raw, uiScale, attentionBackend, h3ParallelAttentionEnabled: raw.h3ParallelAttentionEnabled === true, queueDelaySeconds: Math.max(0, Math.min(600, Number(raw.queueDelaySeconds) || 0)), experimentalLtxMsrEnabled: raw.experimentalLtxMsrEnabled === true, blurNsfwLivePreviews: raw.blurNsfwLivePreviews === true, llmProvider: raw.llmProvider === 'lmstudio' ? 'lmstudio' : 'ollama', characterDetailReferencesEnabled: raw.characterDetailReferencesEnabled === true, renderSettingsPresets, paths: { ...defaults.paths, ...raw.paths }, generationDefaults }
+    const outputDirectory = typeof raw.outputDirectory === 'string' && raw.outputDirectory.trim() ? raw.outputDirectory.trim() : defaults.outputDirectory
+    const clipMasterOutputDirectory = typeof raw.clipMasterOutputDirectory === 'string' && raw.clipMasterOutputDirectory.trim() ? raw.clipMasterOutputDirectory.trim() : join(outputDirectory, 'video')
+    return { ...defaults, ...raw, outputDirectory, clipMasterOutputDirectory, uiScale, attentionBackend, h3ParallelAttentionEnabled: raw.h3ParallelAttentionEnabled === true, queueDelaySeconds: Math.max(0, Math.min(600, Number(raw.queueDelaySeconds) || 0)), experimentalLtxMsrEnabled: raw.experimentalLtxMsrEnabled === true, blurNsfwLivePreviews: raw.blurNsfwLivePreviews === true, llmProvider: raw.llmProvider === 'lmstudio' ? 'lmstudio' : 'ollama', characterDetailReferencesEnabled: raw.characterDetailReferencesEnabled === true, renderSettingsPresets, paths: { ...defaults.paths, ...raw.paths }, generationDefaults }
   } catch {
     return defaultSettings()
   }
@@ -645,6 +649,58 @@ function runFfmpeg(executable: string, args: string[]) {
     child.once('error', (error) => reject(new Error(`Could not start FFmpeg: ${error.message}`)))
     child.once('close', (code) => code === 0 ? resolve() : reject(new Error(`FFmpeg failed (${code}). ${errorText.split('\n').slice(-5).join(' ')}`)))
   })
+}
+
+function resolveMediaTool(executable: string, name: 'ffmpeg' | 'ffprobe') {
+  const configured = executable.trim().replace(/^("')|("')$/g, '')
+  if (configured && extname(configured).toLowerCase() === (process.platform === 'win32' ? '.exe' : '')) {
+    const sibling = join(dirname(configured), process.platform === 'win32' ? `${name}.exe` : name)
+    if (existsSync(sibling)) return sibling
+    return name === 'ffmpeg' ? configured : name
+  }
+  const candidate = configured ? join(configured, process.platform === 'win32' ? `${name}.exe` : name) : ''
+  return candidate && existsSync(candidate) ? candidate : name
+}
+
+function runFfprobe(executable: string, args: string[]) {
+  return new Promise<string>((resolve, reject) => {
+    const child = spawn(resolveMediaTool(executable, 'ffprobe'), args, { windowsHide: true })
+    let stdout = ''; let stderr = ''
+    child.stdout.on('data', (chunk) => { stdout += chunk })
+    child.stderr.on('data', (chunk) => { stderr = `${stderr}${chunk}`.slice(-8000) })
+    child.once('error', (error) => reject(new Error(`Could not start FFprobe: ${error.message}`)))
+    child.once('close', (code) => code === 0 ? resolve(stdout) : reject(new Error(`FFprobe failed (${code}). ${stderr.split('\n').slice(-5).join(' ')}`)))
+  })
+}
+
+type ClipVideoMetadata = { duration: number; fps: number; frameCount: number; width: number; height: number }
+
+async function probeClipVideoMetadata(input: string, ffmpegPath: string): Promise<ClipVideoMetadata> {
+  const raw = await runFfprobe(ffmpegPath, ['-v', 'error', '-select_streams', 'v:0', '-count_frames', '-show_entries', 'stream=width,height,avg_frame_rate,r_frame_rate,nb_frames,nb_read_frames,duration:format=duration', '-of', 'json', input])
+  const payload = JSON.parse(raw) as { streams?: Array<{ width?: number; height?: number; avg_frame_rate?: string; r_frame_rate?: string; nb_frames?: string | number; nb_read_frames?: string | number; duration?: string | number }>; format?: { duration?: string | number } }
+  const stream = payload.streams?.[0]
+  if (!stream) throw new Error('No video stream was found in the selected clip.')
+  const parseRate = (value?: string) => { const [numerator, denominator] = String(value ?? '').split('/').map(Number); return denominator > 0 ? numerator / denominator : Number(value) }
+  const parsedFps = parseRate(stream.avg_frame_rate) || parseRate(stream.r_frame_rate) || 24
+  const fps = Number.isFinite(parsedFps) && parsedFps > 0 ? parsedFps : 24
+  const parsedDuration = Number(stream.duration ?? payload.format?.duration ?? 0)
+  const duration = Number.isFinite(parsedDuration) && parsedDuration > 0 ? parsedDuration : 0
+  const countedFrames = Number(stream.nb_read_frames)
+  const declaredFrames = Number(stream.nb_frames)
+  const frameCount = Number.isFinite(countedFrames) && countedFrames > 0 ? Math.round(countedFrames) : Number.isFinite(declaredFrames) && declaredFrames > 0 ? Math.round(declaredFrames) : Math.max(1, Math.round(duration * fps))
+  return { duration: duration || frameCount / fps, fps, frameCount, width: Number(stream.width) || 0, height: Number(stream.height) || 0 }
+}
+
+function clipMasterSlug(value: string) {
+  const stem = basename(value).replace(/\.[^.]+$/, '')
+  return (stem || 'clip').replace(/[^a-z0-9_-]+/gi, '_').replace(/^_+|_+$/g, '').slice(0, 80) || 'clip'
+}
+
+async function nextClipMasterPath(folder: string, stem: string, extension: string, alwaysVersion = false) {
+  let version = 1
+  const candidate = (value: number) => join(folder, `${stem}${alwaysVersion || value > 1 ? `_v${String(value).padStart(3, '0')}` : ''}.${extension}`)
+  while (existsSync(candidate(version))) version += 1
+  return candidate(version)
 }
 
 function runTool(executable: string, args: string[], label: string) {
@@ -1023,6 +1079,74 @@ app.whenReady().then(async () => {
     if (!existsSync(filePath) || !selectedMediaExtensions.has(extname(filePath).toLowerCase())) throw new Error('The selected media is unavailable.')
     return `minimax-media://selected?path=${encodeURIComponent(filePath)}`
   })
+  ipcMain.handle('media:validate', async (_event, files: Array<{ path?: unknown; kind?: unknown }>) => {
+    if (!Array.isArray(files) || files.length > 16) throw new Error('Validate no more than 16 media files at once.')
+    return Promise.all(files.map(async (file) => {
+      const path = typeof file?.path === 'string' ? file.path : ''
+      const kind = file?.kind === 'image' || file?.kind === 'video' || file?.kind === 'audio' ? file.kind : 'image'
+      if (!path) return { path, valid: false, reason: 'Missing file path.' }
+      if (path.startsWith('minimax-media:')) return { path, valid: true }
+      const extensions = kind === 'image' ? imageExtensions : kind === 'video' ? mediaExtensions : new Set(['.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac'])
+      if (!extensions.has(extname(path).toLowerCase())) return { path, valid: false, reason: `Expected a supported ${kind} file.` }
+      const details = await stat(path).catch(() => null)
+      if (!details?.isFile() || details.size < 1) return { path, valid: false, reason: 'File is missing or empty.' }
+      return { path, valid: true }
+    }))
+  })
+  ipcMain.handle('video:metadata', async (_event, source: string, ffmpegPath: string) => {
+    const input = await resolveVideoSource(source)
+    return probeClipVideoMetadata(input, ffmpegPath)
+  })
+  ipcMain.handle('clip-master:frames', async (_event, source: string, frames: Array<{ index: number; role: 'start' | 'end' | 'frame' }>, outputDirectory: string, ffmpegPath: string, sourceName: string) => {
+    if (!Array.isArray(frames) || !frames.length || frames.length > 100) throw new Error('Choose between 1 and 100 frames to save.')
+    const settings = await loadSettings()
+    if (normalize(outputDirectory).toLowerCase() !== normalize(settings.clipMasterOutputDirectory).toLowerCase()) throw new Error('Clip Master frames must be saved inside the configured Clip Master output folder.')
+    const input = await resolveVideoSource(source)
+    const metadata = await probeClipVideoMetadata(input, ffmpegPath)
+    if (frames.some((item) => !Number.isFinite(Number(item.index)) || Number(item.index) < 0 || Math.floor(Number(item.index)) >= metadata.frameCount)) throw new Error(`Choose frame indexes between 0 and ${metadata.frameCount - 1}.`)
+    const folder = join(outputDirectory, 'ClipMaster', clipMasterSlug(sourceName))
+    await mkdir(folder, { recursive: true })
+    const files: Array<{ path: string; name: string; index: number; role: 'start' | 'end' | 'frame' }> = []
+    for (const item of frames) {
+      const index = Math.max(0, Math.floor(Number(item.index)))
+      if (!Number.isFinite(index)) continue
+      const label = item.role === 'start' ? 'start_frame' : item.role === 'end' ? 'end_frame' : 'frame'
+      const output = await nextClipMasterPath(folder, `${clipMasterSlug(sourceName)}_${label}_${String(index).padStart(4, '0')}`, 'png')
+      await runFfmpeg(ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-i', input, '-vf', `select=eq(n\\,${index})`, '-vsync', 'vfr', '-frames:v', '1', '-update', '1', '-y', output])
+      const created = await stat(output).catch(() => null)
+      if (!created?.size) throw new Error(`FFmpeg did not produce frame ${index}.`)
+      files.push({ path: output, name: basename(output), index, role: item.role })
+    }
+    return { folder, files }
+  })
+  ipcMain.handle('clip-master:choose-export-path', async (_event, outputDirectory: string, sourceName: string) => {
+    const folder = join(outputDirectory, 'ClipMaster', clipMasterSlug(sourceName))
+    const suggested = await nextClipMasterPath(folder, `${clipMasterSlug(sourceName)}_clipmaster`, 'mp4', true)
+    const result = await dialog.showSaveDialog({
+      title: 'Export Clip Master video',
+      defaultPath: suggested,
+      filters: [{ name: 'MP4 video', extensions: ['mp4'] }],
+    })
+    return result.canceled || !result.filePath ? null : result.filePath
+  })
+  ipcMain.handle('clip-master:trim', async (_event, source: string, startFrame: number, endFrame: number, fps: number, outputPath: string, ffmpegPath: string) => {
+    const start = Math.max(0, Math.floor(Number(startFrame))); const end = Math.max(start, Math.floor(Number(endFrame))); const requestedRate = Number(fps)
+    if (!Number.isFinite(start) || !Number.isFinite(end) || !Number.isFinite(requestedRate) || requestedRate <= 0) throw new Error('Choose a valid frame range and frame rate.')
+    if (!isAbsolute(outputPath) || extname(outputPath).toLowerCase() !== '.mp4') throw new Error('Choose a valid .mp4 export file location.')
+    if (existsSync(outputPath)) throw new Error(`“${basename(outputPath)}” already exists. Choose a new versioned filename so no earlier export is overwritten.`)
+    const input = await resolveVideoSource(source)
+    const metadata = await probeClipVideoMetadata(input, ffmpegPath)
+    if (end >= metadata.frameCount) throw new Error(`End frame ${end} is outside this clip. The final frame is ${metadata.frameCount - 1}.`)
+    const rate = metadata.fps
+    const folder = dirname(outputPath); await mkdir(folder, { recursive: true })
+    const duration = (end - start + 1) / rate
+    const startSeconds = start / rate
+    const endSeconds = startSeconds + duration
+    const outputRate = Number.isInteger(rate) ? String(rate) : rate.toFixed(6)
+    await runFfmpeg(ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-i', input, '-vf', `select=between(n\\,${start}\\,${end}),setpts=N/${outputRate}/TB`, '-af', `atrim=start=${startSeconds}:end=${endSeconds},asetpts=PTS-STARTPTS`, '-t', duration.toFixed(6), '-map', '0:v:0', '-map', '0:a?', '-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p', '-r', outputRate, '-fps_mode', 'vfr', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', '-y', outputPath])
+    const created = await stat(outputPath).catch(() => null); if (!created?.size) throw new Error('FFmpeg completed without producing the Clip Master export.')
+    return { path: outputPath, name: basename(outputPath), url: `minimax-media://local?path=${encodeURIComponent(outputPath)}`, folder, frameCount: end - start + 1, duration }
+  })
   ipcMain.handle('video:frame', async (_event, source: string, position: number | 'last', outputDirectory: string, ffmpegPath: string) => {
     const input = await resolveVideoSource(source)
     const framesDirectory = join(outputDirectory, 'Oyama AI Video Studio Frames')
@@ -1030,8 +1154,13 @@ app.whenReady().then(async () => {
     const label = position === 'last' ? 'last' : `at_${Math.max(0, position).toFixed(2).replace('.', '-')}`
     const name = `frame_${label}_${Date.now()}.png`
     const output = join(framesDirectory, name)
-    const seek = position === 'last' ? ['-sseof', '-0.15'] : ['-ss', String(Math.max(0, position))]
-    await runFfmpeg(ffmpegPath, ['-hide_banner', '-loglevel', 'error', ...seek, '-i', input, '-map', '0:v:0', '-frames:v', '1', '-update', '1', '-y', output])
+    if (position === 'last') {
+      const metadata = await probeClipVideoMetadata(input, ffmpegPath)
+      const lastFrame = Math.max(0, metadata.frameCount - 1)
+      await runFfmpeg(ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-i', input, '-map', '0:v:0', '-vf', `select=eq(n\\,${lastFrame})`, '-vsync', 'vfr', '-frames:v', '1', '-update', '1', '-y', output])
+    } else {
+      await runFfmpeg(ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-ss', String(Math.max(0, position)), '-i', input, '-map', '0:v:0', '-frames:v', '1', '-update', '1', '-y', output])
+    }
     const extracted = await stat(output).catch(() => null)
     if (!extracted?.size) throw new Error('FFmpeg completed without producing a frame. Check that the clip contains a video stream.')
     return { path: output, name }

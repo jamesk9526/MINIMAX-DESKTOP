@@ -4,14 +4,12 @@ import { CHARACTER_LIBRARY_EVENT, characterReferences, loadCharacterProjects } f
 import { LOCATION_LIBRARY_EVENT, loadLocationProjects, locationReferences } from '../lib/locationLibrary'
 import { composeReferenceInstructions, resolveMovieShot } from '../lib/promptComposer'
 import { SmartPromptEditor, type SmartInsertOption } from './SmartPromptEditor'
+import { MINIMAX_VIDEO_RESOLUTIONS } from '../lib/videoResolutions'
 import { createId } from '../lib/createId'
 import type { AppSettings, CharacterProject, GenerationJob, GenerationMode, LocationProject, MediaFile, MovieCharacter, MovieChatArea, MovieLocation, MovieProject, MovieScene, MovieShot, ResolvedMovieShot } from '../types'
 import { resolveLlmConnection } from '../lib/llmProvider'
 
 type PlannerStep = 'setup' | 'bible' | 'shots' | 'runner' | 'preview'
-
-// Keep whole-run settings in lockstep with Ref2VA's supported MiniMax H3 canvases.
-const minimaxRunResolutions = ['608x352', '736x416', '768x448', '864x480', '960x544', '1024x576', '1056x608', '1152x640', '1216x672', '1280x736', '1344x768', '672x288', '896x384', '1120x480', '1216x512', '1344x576', '352x608', '416x736', '448x768', '480x864', '544x960', '576x1024', '608x1056', '640x1152', '672x1216', '736x1280', '768x1344', '512x512', '640x640', '768x768']
 
 const plannerSchema: Record<string, unknown> = {
   type: 'object', properties: { scenes: { type: 'array', minItems: 1, maxItems: 24, items: {
@@ -36,7 +34,7 @@ const movieChatSchema: Record<string, unknown> = {
   type: 'object', properties: {
     reply: { type: 'string' }, changes: { type: 'array', items: { type: 'string' } },
     focusAreas: { type: 'array', items: { type: 'string', enum: ['setup', 'bible', 'shots', 'preview'] } },
-    projectPatch: { type: 'object', properties: { title: { type: 'string' }, targetRuntime: { type: 'number' }, computeBudgetMinutes: { type: 'number' }, aspectRatio: { type: 'string', enum: ['16:9', '9:16', '1:1'] }, genre: { type: 'string' }, visualStyle: { type: 'string' }, quality: { type: 'string', enum: ['preview', 'balanced', 'maximum'] }, reviewGate: { type: 'string', enum: ['shot', 'scene', 'batch'] }, story: { type: 'string' }, visualRules: { type: 'string' } }, required: ['title', 'targetRuntime', 'computeBudgetMinutes', 'aspectRatio', 'genre', 'visualStyle', 'quality', 'reviewGate', 'story', 'visualRules'] },
+    projectPatch: { type: 'object', properties: { title: { type: 'string' }, targetRuntime: { type: 'number' }, computeBudgetMinutes: { type: 'number' }, aspectRatio: { type: 'string', enum: ['16:9', '9:16', '1:1'] }, genre: { type: 'string' }, visualStyle: { type: 'string' }, story: { type: 'string' }, visualRules: { type: 'string' } }, required: ['title', 'targetRuntime', 'computeBudgetMinutes', 'aspectRatio', 'genre', 'visualStyle', 'story', 'visualRules'] },
     characterUpserts: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, name: { type: 'string' }, description: { type: 'string' }, wardrobe: { type: 'string' }, voiceNotes: { type: 'string' } }, required: ['id', 'name', 'description', 'wardrobe', 'voiceNotes'] } },
     characterDeletes: { type: 'array', items: { type: 'string' } },
     locationUpserts: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, name: { type: 'string' }, description: { type: 'string' } }, required: ['id', 'name', 'description'] } },
@@ -75,21 +73,58 @@ type MovieUndoHistory = Record<string, MovieUndoEntry[]>
 
 function makeProject(index = 1): MovieProject {
   const now = Date.now()
-  return { id: createId(), title: index === 1 ? 'Untitled movie' : `Movie ${index}`, createdAt: now, updatedAt: now, status: 'planning', targetRuntime: 60, computeBudgetMinutes: 120, aspectRatio: '16:9', genre: '', visualStyle: '', quality: 'balanced', reviewGate: 'scene', story: '', visualRules: '', characters: [], locations: [], scenes: [], chatMessages: [] }
+  return { id: createId(), title: index === 1 ? 'Untitled movie' : `Movie ${index}`, createdAt: now, updatedAt: now, status: 'planning', targetRuntime: 60, computeBudgetMinutes: 120, aspectRatio: '16:9', genre: '', visualStyle: '', story: '', visualRules: '', characters: [], locations: [], scenes: [], chatMessages: [] }
+}
+
+function normalizeShotStage(value: unknown, hasOutput: boolean): MovieShot['stage'] {
+  if (value === 'rendered') return 'review'
+  if (value === 'planned' || value === 'ready' || value === 'rendering' || value === 'review' || value === 'approved' || value === 'locked') return value
+  return hasOutput ? 'review' : 'planned'
 }
 
 function loadProjects(): MovieProject[] {
   try {
-    const stored = JSON.parse(localStorage.getItem('minimax.movie-projects') ?? '[]') as Partial<MovieProject>[]
-    const projects = stored.filter((item) => item.id && item.title).map((item, index) => ({
-      ...makeProject(index + 1), ...item,
+    const stored = JSON.parse(localStorage.getItem('minimax.movie-projects') ?? '[]') as Array<Partial<MovieProject> & { quality?: unknown; reviewGate?: unknown }>
+    const projects = stored.filter((item) => item.id && item.title).map((item, index) => {
+      const sanitized = { ...item }
+      delete sanitized.quality
+      delete sanitized.reviewGate
+      return {
+      ...makeProject(index + 1), ...sanitized,
       characters: (item.characters ?? []).map((character) => ({ ...character, referenceImages: character.referenceImages ?? [] })),
       locations: (item.locations ?? []).map((location) => ({ ...location, referenceImages: location.referenceImages ?? [] })),
-      scenes: (item.scenes ?? []).map((scene, sceneIndex) => ({ ...scene, transition: scene.transition ?? (sceneIndex === 0 ? 'cut' : 'connected'), shots: (scene.shots ?? []).map((shot) => ({ ...shot, preferredMode: shot.preferredMode ?? shot.mode ?? 'text', characterIds: shot.characterIds ?? [], referenceImages: shot.referenceImages ?? [], referenceVideos: shot.referenceVideos ?? [], referenceAudios: shot.referenceAudios ?? [] })) })),
+      scenes: (item.scenes ?? []).map((scene, sceneIndex) => {
+        const shots = (scene.shots ?? []).map((shot) => ({ ...shot, preferredMode: shot.preferredMode ?? shot.mode ?? 'text', characterIds: shot.characterIds ?? [], referenceImages: shot.referenceImages ?? [], referenceVideos: shot.referenceVideos ?? [], referenceAudios: shot.referenceAudios ?? [], outputPath: shot.outputPath ?? localPathFromMediaUrl(shot.outputUrl), stage: normalizeShotStage(shot.stage, Boolean(shot.outputUrl)) }))
+        return { ...scene, transition: scene.transition ?? (sceneIndex === 0 ? 'cut' : 'connected'), stage: scene.stage ?? (shots.length && shots.every((shot) => shot.outputUrl) ? 'review' as const : 'planned' as const), shots }
+      }),
       chatMessages: item.chatMessages ?? [],
-    })) as MovieProject[]
+    }}) as MovieProject[]
     return projects.length ? projects : [makeProject()]
   } catch { return [makeProject()] }
+}
+
+function localPathFromMediaUrl(value?: string) {
+  if (!value) return undefined
+  try {
+    const url = new URL(value)
+    return url.protocol === 'minimax-media:' && (url.hostname === 'selected' || url.hostname === 'local') ? url.searchParams.get('path') ?? undefined : undefined
+  } catch { return undefined }
+}
+
+function outputPathForShot(shot: MovieShot, jobs: GenerationJob[], projectId: string, sceneId: string) {
+  const job = jobs.find((item) => item.movieLink?.projectId === projectId && item.movieLink.sceneId === sceneId && item.movieLink.shotId === shot.id && item.status === 'completed')
+  return shot.outputPath ?? job?.localOutputPath ?? localPathFromMediaUrl(shot.outputUrl)
+}
+
+function productionSettingsFor(project: MovieProject, workingSeed: number): NonNullable<MovieProject['productionSettings']> {
+  return {
+    resolution: project.productionSettings?.resolution ?? (project.aspectRatio === '9:16' ? '768x1344' : project.aspectRatio === '1:1' ? '768x768' : '1344x768'),
+    turbo: project.productionSettings?.turbo ?? 'off',
+    steps: project.productionSettings?.steps ?? 30,
+    seed: project.productionSettings?.seed ?? workingSeed,
+    noDialogue: project.productionSettings?.noDialogue ?? true,
+    naturalMovement: project.productionSettings?.naturalMovement ?? true,
+  }
 }
 
 function loadMovieUndoHistory(): MovieUndoHistory {
@@ -99,9 +134,9 @@ function loadMovieUndoHistory(): MovieUndoHistory {
   } catch { return {} }
 }
 
-export function MoviePlanner({ settings, jobs, ollamaAvailable, ollamaModel, onOpenShot, onNotice }: {
-  settings: AppSettings; jobs: GenerationJob[]; ollamaAvailable: boolean; ollamaModel: string
-  onOpenShot(shot: MovieShot, aspectRatio: MovieProject['aspectRatio'], resolved: ResolvedMovieShot, context: { projectId: string; sceneId: string; continuationSource?: string; autoStart?: boolean; renderSettings?: MovieProject['productionSettings'] }): void
+export function MoviePlanner({ settings, jobs, workingSeed, connected, ollamaAvailable, ollamaModel, onOpenShot, onNotice }: {
+  settings: AppSettings; jobs: GenerationJob[]; workingSeed: number; connected: boolean; ollamaAvailable: boolean; ollamaModel: string
+  onOpenShot(shot: MovieShot, aspectRatio: MovieProject['aspectRatio'], resolved: ResolvedMovieShot, context: { projectId: string; sceneId: string; continuationSource?: string; continuityFrame?: MediaFile; autoStart?: boolean; renderSettings?: MovieProject['productionSettings'] }): void
   onNotice(tone: 'error' | 'success' | 'neutral', text: string): void
 }) {
   const [projects, setProjects] = useState<MovieProject[]>(loadProjects)
@@ -156,7 +191,11 @@ export function MoviePlanner({ settings, jobs, ollamaAvailable, ollamaModel, onO
     try { localStorage.setItem(MOVIE_UNDO_HISTORY_KEY, JSON.stringify(next)) }
     catch { onNotice('neutral', 'Undo is available for this session, but its snapshot was too large to keep after restart.') }
   }
-  const update = (change: (current: MovieProject) => MovieProject) => commit(projects.map((item) => item.id === project.id ? { ...change(item), updatedAt: Date.now() } : item))
+  const update = (change: (current: MovieProject) => MovieProject) => setProjects((currentProjects) => {
+    const next = currentProjects.map((item) => item.id === project.id ? { ...change(item), updatedAt: Date.now() } : item)
+    localStorage.setItem('minimax.movie-projects', JSON.stringify(next))
+    return next
+  })
   const updateScene = (id: string, change: Partial<MovieScene>) => update((value) => ({ ...value, scenes: value.scenes.map((item) => item.id === id ? { ...item, ...change } : item) }))
   const updateShot = (sceneId: string, shotId: string, change: Partial<MovieShot>) => update((value) => ({ ...value, scenes: value.scenes.map((scene) => scene.id === sceneId ? { ...scene, shots: scene.shots.map((shot) => shot.id === shotId ? { ...shot, ...change } : shot) } : scene) }))
   const addScene = () => {
@@ -177,51 +216,86 @@ export function MoviePlanner({ settings, jobs, ollamaAvailable, ollamaModel, onO
     return () => window.removeEventListener('minimax-movie-production-updated', refresh)
   }, [])
 
-  const queueRunnerShot = (scene: MovieScene, shot: MovieShot) => {
+  const queueRunnerShot = (scene: MovieScene, shot: MovieShot, approvedContinuityFrame?: MediaFile) => {
+    if (!connected) return onNotice('error', 'Start ComfyUI and verify the Local engine connection before starting production.')
+    if (project.status === 'paused') return onNotice('error', 'Resume this movie before starting production.')
+    if (shot.outputUrl) return onNotice('neutral', `${shot.title} already has an attached output.`)
+    if (jobs.some((item) => item.movieLink?.projectId === project.id && item.movieLink.sceneId === scene.id && item.movieLink.shotId === shot.id && ['queued', 'running'].includes(item.status))) return onNotice('neutral', `${shot.title} is already queued in ComfyUI.`)
     if (!shot.prompt.trim()) return onNotice('error', `${shot.title} needs a production prompt before it can render.`)
+    const firstPending = scene.shots.find((item) => !item.outputUrl)
+    if (firstPending?.id !== shot.id) return onNotice('error', `Finish ${firstPending?.title ?? 'the preceding shot'} before rendering ${shot.title}.`)
     const shotIndex = scene.shots.findIndex((item) => item.id === shot.id)
     const predecessor = shotIndex > 0 ? scene.shots[shotIndex - 1] : undefined
     if (predecessor && !predecessor.outputUrl) return onNotice('error', `Finish ${predecessor.title} before continuing this scene.`)
-    const priorScene = shotIndex === 0 ? project.scenes[project.scenes.findIndex((item) => item.id === scene.id) - 1] : undefined
-    const continuityOwner = predecessor ?? priorScene?.shots.at(-1)
-    const completedJob = continuityOwner && jobs.find((item) => item.movieLink?.projectId === project.id && item.movieLink?.sceneId === (predecessor ? scene.id : priorScene?.id) && item.movieLink?.shotId === continuityOwner.id && item.status === 'completed')
-    // Never hand a browser/ComfyUI preview URL to frame extraction. Older
-    // completed shots without a retained local path must be rerendered.
-    if (continuityOwner && !completedJob?.localOutputPath) return onNotice('error', `The local video for ${continuityOwner.title} is unavailable, so its final continuity frame cannot be extracted. Rerender that shot to continue seamlessly.`)
-    const continuitySource = completedJob?.localOutputPath
-    const resolved = resolveMovieShot(project, scene, shot, characterLibrary, continuitySource ? { path: continuitySource, name: `${continuityOwner?.title ?? 'Previous scene'} final frame`, kind: 'image' } : undefined)
+    const sceneIndex = project.scenes.findIndex((item) => item.id === scene.id)
+    const priorScene = shotIndex === 0 && scene.transition === 'connected' ? project.scenes[sceneIndex - 1] : undefined
+    if (priorScene && priorScene.stage !== 'locked' && !approvedContinuityFrame) return onNotice('error', `Approve and lock ${priorScene.title} before continuing into ${scene.title}.`)
+    const predecessorPath = predecessor ? outputPathForShot(predecessor, jobs, project.id, scene.id) : undefined
+    const priorFinalShot = priorScene?.shots.at(-1)
+    const priorVideoPath = priorScene && priorFinalShot ? outputPathForShot(priorFinalShot, jobs, project.id, priorScene.id) : undefined
+    const continuityFrame = predecessor ? undefined : approvedContinuityFrame ?? priorScene?.continuityFrame
+    const continuitySource = predecessor ? predecessorPath : continuityFrame ? undefined : priorVideoPath
+    const continuityOwner = predecessor ?? priorFinalShot
+    if (continuityOwner && !continuityFrame && !continuitySource) return onNotice('error', `The local video for ${continuityOwner.title} is unavailable. Replace or rerender that shot before continuing.`)
+    const continuityBinding = continuityFrame ?? (continuitySource ? { path: continuitySource, name: `${continuityOwner?.title ?? 'Previous scene'} final frame`, kind: 'image' as const } : undefined)
+    const resolved = resolveMovieShot(project, scene, shot, characterLibrary, continuityBinding)
     if (resolved.omittedReferences.length) return onNotice('error', `${shot.title} exceeds the nine-image reference limit. Reduce assigned references first.`)
-    update((value) => ({ ...value, scenes: value.scenes.map((item) => item.id !== scene.id ? item : { ...item, stage: 'rendering', shots: item.shots.map((candidate) => candidate.id === shot.id ? { ...candidate, stage: 'rendering' } : candidate) }) }))
-    onOpenShot(shot, project.aspectRatio, resolved, { projectId: project.id, sceneId: scene.id, continuationSource: continuitySource, autoStart: true, renderSettings: project.productionSettings })
+    // Keep the persisted runner retryable until App has created a real queue
+    // job. The live job itself drives the Rendering label; failed validation or
+    // an offline handoff therefore cannot strand a scene in Rendering.
+    update((value) => ({ ...value, scenes: value.scenes.map((item) => item.id !== scene.id ? item : { ...item, stage: 'ready', previewUrl: undefined, approvedAt: undefined, lockedAt: undefined, continuityFrame: undefined, continuityState: undefined, shots: item.shots.map((candidate) => candidate.id === shot.id ? { ...candidate, stage: 'ready' } : candidate) }) }))
+    onOpenShot(shot, project.aspectRatio, resolved, { projectId: project.id, sceneId: scene.id, continuationSource: continuitySource, continuityFrame, autoStart: true, renderSettings: productionSettingsFor(project, workingSeed) })
   }
 
   const assembleScene = async (scene: MovieScene) => {
-    const clips = scene.shots.map((shot) => {
-      const job = jobs.find((item) => item.movieLink?.projectId === project.id && item.movieLink?.sceneId === scene.id && item.movieLink?.shotId === shot.id && item.status === 'completed')
-      return { source: job?.localOutputPath ?? shot.outputUrl!, start: 0, end: shot.duration }
-    })
-    if (clips.some((clip) => !clip.source)) return
+    const clips = scene.shots.map((shot) => ({ source: outputPathForShot(shot, jobs, project.id, scene.id) ?? shot.outputUrl ?? '' }))
+    const missing = clips.findIndex((clip) => !clip.source)
+    if (missing >= 0) {
+      onNotice('error', `${scene.shots[missing].title} has no accessible output, so the scene preview cannot be assembled.`)
+      return
+    }
     try {
       const joined = await window.minimax.joinVideos(clips, settings.outputDirectory, settings.ffmpegPath)
-      updateScene(scene.id, { previewUrl: joined.url, stage: 'review', continuityState: `All ${scene.shots.length} shots rendered and assembled for review.` })
+      updateScene(scene.id, { previewUrl: joined.url, stage: 'review', continuityState: `All ${scene.shots.length} shots rendered and assembled in story order. Review before locking continuity.` })
       onNotice('success', `${scene.title} is ready for scene review.`)
     } catch (error) { onNotice('error', `Shots finished, but the scene preview could not be assembled: ${error instanceof Error ? error.message : String(error)}`) }
   }
 
   const approveRunnerScene = async (scene: MovieScene) => {
     const finalShot = scene.shots.at(-1)
-    if (!finalShot?.outputUrl) return
+    if (!finalShot?.outputUrl) { onNotice('error', 'Every shot needs an output before this scene can be approved.'); return }
+    updateScene(scene.id, { stage: 'approved', continuityState: 'Approved. Saving the final continuity frame and locking the scene…' })
     try {
-      const finalJob = jobs.find((item) => item.movieLink?.projectId === project.id && item.movieLink?.sceneId === scene.id && item.movieLink?.shotId === finalShot.id && item.status === 'completed')
-      const frame = await window.minimax.extractVideoFrame(finalJob?.localOutputPath ?? finalShot.outputUrl, 'last', settings.outputDirectory, settings.ffmpegPath)
+      const source = outputPathForShot(finalShot, jobs, project.id, scene.id) ?? finalShot.outputUrl
+      const frame = await window.minimax.extractVideoFrame(source, 'last', settings.outputDirectory, settings.ffmpegPath)
       const continuityFrame = { ...frame, kind: 'image' as const, preview: await window.minimax.mediaUrl(frame.path) }
-      updateScene(scene.id, { stage: 'locked', approvedAt: Date.now(), lockedAt: Date.now(), continuityFrame, continuityState: `Locked from ${finalShot.title}; final frame is the approved continuity anchor.` })
+      const lockedAt = Date.now()
+      updateScene(scene.id, { stage: 'locked', approvedAt: lockedAt, lockedAt, continuityFrame, continuityState: `Locked from ${finalShot.title}. ${frame.name} is the approved continuity anchor.`, shots: scene.shots.map((shot) => ({ ...shot, stage: 'locked' })) })
       onNotice('success', `${scene.title} approved and locked.`)
       const nextScene = project.scenes[project.scenes.findIndex((item) => item.id === scene.id) + 1]
       if (project.autoContinueCleanScenes && nextScene?.shots[0] && !nextScene.shots.some((shot) => shot.outputUrl)) {
-        queueRunnerShot(nextScene, nextScene.shots[0])
+        queueRunnerShot(nextScene, nextScene.shots[0], nextScene.transition === 'connected' ? continuityFrame : undefined)
       }
-    } catch (error) { onNotice('error', `Could not save the final continuity frame: ${error instanceof Error ? error.message : String(error)}`) }
+    } catch (error) {
+      updateScene(scene.id, { stage: 'review', continuityState: 'Approval could not be completed. Review remains open and no continuity lock was changed.' })
+      onNotice('error', `Could not save the final continuity frame: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  const replaceRunnerShotOutput = async (scene: MovieScene, shot: MovieShot) => {
+    try {
+      const picked = await window.minimax.chooseMedia('video')
+      if (!picked) return
+      const outputUrl = await window.minimax.mediaUrl(picked.path)
+      const shots = scene.shots.map((item) => item.id === shot.id ? { ...item, outputUrl, outputPath: picked.path, renderJobId: undefined, renderedAt: Date.now(), stage: 'review' as const } : item)
+      updateScene(scene.id, { shots, previewUrl: undefined, stage: shots.every((item) => item.outputUrl) ? 'rendering' : 'planned', approvedAt: undefined, lockedAt: undefined, continuityFrame: undefined, continuityState: `${shot.title} was replaced with ${picked.name}. Rebuilding the scene preview…` })
+      onNotice('success', `${picked.name} attached to ${shot.title}.`)
+    } catch (error) { onNotice('error', `Could not replace ${shot.title}: ${error instanceof Error ? error.message : String(error)}`) }
+  }
+
+  const rerenderRunnerShot = (scene: MovieScene, shot: MovieShot) => {
+    const shots = scene.shots.map((item) => item.id === shot.id ? { ...item, outputUrl: undefined, outputPath: undefined, renderJobId: undefined, renderedAt: undefined, stage: 'planned' as const } : item)
+    updateScene(scene.id, { shots, previewUrl: undefined, stage: 'planned', approvedAt: undefined, lockedAt: undefined, continuityFrame: undefined, continuityState: `${shot.title} is ready to rerender. The scene preview will rebuild when it finishes.` })
   }
 
   const requireOllama = () => {
@@ -334,7 +408,7 @@ export function MoviePlanner({ settings, jobs, ollamaAvailable, ollamaModel, onO
     setChatting(true)
     try {
       const context = {
-        project: { title: project.title, targetRuntime: project.targetRuntime, computeBudgetMinutes: project.computeBudgetMinutes, aspectRatio: project.aspectRatio, genre: project.genre, visualStyle: project.visualStyle, quality: project.quality, reviewGate: project.reviewGate, story: project.story, visualRules: project.visualRules },
+        project: { title: project.title, targetRuntime: project.targetRuntime, computeBudgetMinutes: project.computeBudgetMinutes, aspectRatio: project.aspectRatio, genre: project.genre, visualStyle: project.visualStyle, story: project.story, visualRules: project.visualRules },
         characters: project.characters.map(({ id, name, description, wardrobe, voiceNotes }) => ({ id, name, description, wardrobe, voiceNotes })),
         locations: project.locations.map(({ id, name, description }) => ({ id, name, description })),
         scenes: project.scenes.map((scene) => ({ id: scene.id, title: scene.title, summary: scene.summary, locationId: scene.locationId, transition: scene.transition, shots: scene.shots.map(({ id, title, duration, prompt, dialogue, mode, characterIds, stage }) => ({ id, title, duration, prompt, dialogue, mode, characterIds, stage })) })),
@@ -454,7 +528,7 @@ export function MoviePlanner({ settings, jobs, ollamaAvailable, ollamaModel, onO
     {project.status === 'paused' && <div className="movie-paused"><CirclePause size={16} /><span><strong>Project paused</strong><small>Your plan remains editable, but future automated production passes will not queue work.</small></span></div>}
     <nav className="movie-steps" aria-label="Movie production stages"><button className={step === 'setup' ? 'active' : ''} onClick={() => setStep('setup')}><span>1</span><div><strong>Story setup</strong><small>Creative brief</small></div></button><button className={step === 'bible' ? 'active' : ''} onClick={() => setStep('bible')}><span>2</span><div><strong>Production bible</strong><small>People and places</small></div></button><button className={step === 'shots' ? 'active' : ''} onClick={() => setStep('shots')}><span>3</span><div><strong>Shot plan</strong><small>Prepare scenes</small></div></button><button className={step === 'runner' ? 'active' : ''} onClick={() => setStep('runner')}><span>4</span><div><strong>Production runner</strong><small>Queue, review, lock</small></div></button><button className={step === 'preview' ? 'active' : ''} onClick={() => setStep('preview')}><span>5</span><div><strong>Movie preview</strong><small>{renderedClips.length} finished clips</small></div></button></nav>
 
-    {step === 'setup' && <section className="movie-stage"><div className="movie-stage-heading"><div><BookOpen size={18} /><span><strong>Creative brief</strong><small>Start with the story. Production limits are grouped below to keep this page focused.</small></span></div></div><div className="movie-brief-layout"><div className="movie-story-field"><div className="field-heading"><label htmlFor="movie-story">Story, outline, or screenplay</label>{assistantButton('story', `Develop with ${llm.label}`, assistStory)}</div><textarea id="movie-story" value={project.story} onChange={(event) => update((value) => ({ ...value, story: event.target.value }))} placeholder="Begin with a short premise, or paste a complete outline. Include the ending and any dialogue that must be preserved…" /></div><div className="movie-direction-fields"><label>Genre<input value={project.genre} onChange={(event) => update((value) => ({ ...value, genre: event.target.value }))} placeholder="Science fiction, drama…" /></label><label>Visual direction<textarea value={project.visualStyle} onChange={(event) => update((value) => ({ ...value, visualStyle: event.target.value }))} placeholder="Grounded realism, 35mm, restrained handheld camera…" /></label></div></div><details className="movie-production-settings"><summary><span><strong>Production limits</strong><small>{project.targetRuntime}s · {project.aspectRatio} · {project.quality} · review by {project.reviewGate}</small></span><ChevronDown size={16} /></summary><div className="movie-form-grid compact-grid"><label>Target runtime (seconds)<input type="number" min="10" max="3600" value={project.targetRuntime} onChange={(event) => update((value) => ({ ...value, targetRuntime: clamp(Number(event.target.value), 10, 3600) }))} /></label><label>Compute budget (minutes)<input type="number" min="10" max="100000" value={project.computeBudgetMinutes} onChange={(event) => update((value) => ({ ...value, computeBudgetMinutes: clamp(Number(event.target.value), 10, 100000) }))} /></label><label>Aspect ratio<select value={project.aspectRatio} onChange={(event) => update((value) => ({ ...value, aspectRatio: event.target.value as MovieProject['aspectRatio'] }))}><option value="16:9">Landscape · 16:9</option><option value="9:16">Portrait · 9:16</option><option value="1:1">Square · 1:1</option></select></label><label>Quality target<select value={project.quality} onChange={(event) => update((value) => ({ ...value, quality: event.target.value as MovieProject['quality'] }))}><option value="preview">Preview</option><option value="balanced">Balanced</option><option value="maximum">Maximum</option></select></label><label>Review gate<select value={project.reviewGate} onChange={(event) => update((value) => ({ ...value, reviewGate: event.target.value as MovieProject['reviewGate'] }))}><option value="shot">Review every shot</option><option value="scene">Review every scene</option><option value="batch">Review small batches</option></select></label></div></details><div className="movie-stage-actions"><span>{project.story.trim() ? 'Creative brief saved locally.' : 'Add a premise before continuing.'}</span><button className="primary-button" disabled={!project.story.trim()} onClick={() => setStep('bible')}>Continue to bible<ChevronRight size={16} /></button></div></section>}
+    {step === 'setup' && <section className="movie-stage"><div className="movie-stage-heading"><div><BookOpen size={18} /><span><strong>Creative brief</strong><small>Start with the story. Production limits are grouped below to keep this page focused.</small></span></div></div><div className="movie-brief-layout"><div className="movie-story-field"><div className="field-heading"><label htmlFor="movie-story">Story, outline, or screenplay</label>{assistantButton('story', `Develop with ${llm.label}`, assistStory)}</div><textarea id="movie-story" value={project.story} onChange={(event) => update((value) => ({ ...value, story: event.target.value }))} placeholder="Begin with a short premise, or paste a complete outline. Include the ending and any dialogue that must be preserved…" /></div><div className="movie-direction-fields"><label>Genre<input value={project.genre} onChange={(event) => update((value) => ({ ...value, genre: event.target.value }))} placeholder="Science fiction, drama…" /></label><label>Visual direction<textarea value={project.visualStyle} onChange={(event) => update((value) => ({ ...value, visualStyle: event.target.value }))} placeholder="Grounded realism, 35mm, restrained handheld camera…" /></label></div></div><details className="movie-production-settings"><summary><span><strong>Production limits</strong><small>{project.targetRuntime}s · {project.aspectRatio} · scene-by-scene approval</small></span><ChevronDown size={16} /></summary><div className="movie-form-grid compact-grid"><label>Target runtime (seconds)<input type="number" min="10" max="3600" value={project.targetRuntime} onChange={(event) => update((value) => ({ ...value, targetRuntime: clamp(Number(event.target.value), 10, 3600) }))} /></label><label>Compute budget (minutes)<input type="number" min="10" max="100000" value={project.computeBudgetMinutes} onChange={(event) => update((value) => ({ ...value, computeBudgetMinutes: clamp(Number(event.target.value), 10, 100000) }))} /></label><label>Aspect ratio<select value={project.aspectRatio} onChange={(event) => update((value) => ({ ...value, aspectRatio: event.target.value as MovieProject['aspectRatio'] }))}><option value="16:9">Landscape · 16:9</option><option value="9:16">Portrait · 9:16</option><option value="1:1">Square · 1:1</option></select></label></div></details><div className="movie-stage-actions"><span>{project.story.trim() ? 'Creative brief saved locally.' : 'Add a premise before continuing.'}</span><button className="primary-button" disabled={!project.story.trim()} onClick={() => setStep('bible')}>Continue to bible<ChevronRight size={16} /></button></div></section>}
 
     {step === 'bible' && <section className="movie-stage"><div className="movie-stage-heading"><div><Users size={18} /><span><strong>Production bible</strong><small>Create movie-ready people and places without crowding the main workspace.</small></span></div></div><div className="bible-rules"><div className="field-heading"><label htmlFor="visual-rules">Global continuity and camera rules</label>{assistantButton('rules', `Draft rules with ${llm.label}`, assistRules)}</div><textarea id="visual-rules" value={project.visualRules} onChange={(event) => update((value) => ({ ...value, visualRules: event.target.value }))} placeholder="Lighting, palette, lenses, camera motion, prohibited changes, recurring props…" /></div><div className="bible-columns"><AssetCollection title="Characters" subtitle={`${project.characters.length} recurring subjects`} empty="Create recurring cast members here. Each saved character becomes a reusable movie card." onAdd={() => setCharacterDraft(blankCharacter())}>{project.characters.map((character) => { const source = character.libraryCharacterId ? characterLibrary.find((item) => item.id === character.libraryCharacterId) : undefined; const refreshAvailable = Boolean(source && source.updatedAt > (character.libraryUpdatedAt ?? 0)); return <AssetCard key={character.id} icon="character" name={character.name} description={character.description} references={character.referenceImages} linked={Boolean(character.libraryCharacterId)} refreshAvailable={refreshAvailable} onRefresh={() => refreshLibraryCharacter(character.id)} onEdit={() => setCharacterDraft(structuredClone(character))} onRemove={() => { if (window.confirm(`Remove ${character.name} from the production bible?`)) update((value) => ({ ...value, characters: value.characters.filter((item) => item.id !== character.id) })) }} /> })}</AssetCollection><AssetCollection title="Locations" subtitle={`${project.locations.length} recurring sets`} empty="Create recognizable sets here. Each saved location becomes a reusable movie card." onAdd={() => setLocationDraft(blankLocation())}>{project.locations.map((location) => <AssetCard key={location.id} icon="location" name={location.name} description={location.description} references={location.referenceImages} onEdit={() => setLocationDraft(structuredClone(location))} onRemove={() => { if (window.confirm(`Remove ${location.name} from the production bible?`)) update((value) => ({ ...value, locations: value.locations.filter((item) => item.id !== location.id) })) }} />)}</AssetCollection></div><div className="movie-stage-actions"><span>{project.characters.length} characters and {project.locations.length} locations saved.</span><button className="primary-button" onClick={() => setStep('shots')}>Continue to shots<ChevronRight size={16} /></button></div></section>}
 
@@ -464,20 +538,24 @@ export function MoviePlanner({ settings, jobs, ollamaAvailable, ollamaModel, onO
       const sceneSeconds = scene.shots.reduce((total, shot) => total + shot.duration, 0)
       const castNames = project.characters.filter((character) => scene.shots.some((shot) => shot.characterIds.includes(character.id))).map((character) => character.name)
       const previousScene = project.scenes[sceneIndex - 1]
-      const continuationSource = previousScene?.shots[previousScene.shots.length - 1]?.outputUrl
+      const continuationFrame = previousScene?.continuityFrame
       const connected = sceneIndex > 0 && scene.transition === 'connected'
-      const routes = [...new Set(scene.shots.map((shot, index) => routeName(resolveMovieShot(project, scene, shot, characterLibrary, connected && index === 0 && continuationSource ? { path: continuationSource, name: 'Previous shot', kind: 'image' } : undefined).effectiveMode)))]
-      return <article className={`scene-card ${sceneOpen ? 'open' : ''}`} key={scene.id}><button className="scene-card-summary" aria-expanded={sceneOpen} aria-controls={`scene-body-${scene.id}`} onClick={() => setExpandedScenes((value) => value.includes(scene.id) ? value.filter((id) => id !== scene.id) : [...value, scene.id])}><span className="scene-index">{String(sceneIndex + 1).padStart(2, '0')}</span><span className="scene-summary-copy"><strong>{scene.title || `Scene ${sceneIndex + 1}`}</strong><span>{scene.summary || 'No scene summary yet.'}</span><small>{sceneLocation?.name || 'Location not set'} · {scene.shots.length} shot{scene.shots.length === 1 ? '' : 's'} · {formatDuration(sceneSeconds)}</small></span><span className="scene-card-facts"><span>{connected ? continuationSource ? 'Connected · frame ready' : 'Connected · waiting for frame' : sceneIndex ? 'Hard cut' : 'Opening scene'}</span><span>{routes.length ? routes.join(' + ') : 'No routes'} · {castNames.length ? castNames.join(', ') : 'No cast assigned'}</span></span><ChevronDown className="scene-card-chevron" size={17} /></button>{sceneOpen && <div className="scene-card-body" id={`scene-body-${scene.id}`}><div className="scene-editor"><div><label>Scene title<input aria-label={`Scene ${sceneIndex + 1} title`} value={scene.title} onChange={(event) => updateScene(scene.id, { title: event.target.value })} /></label><label>Scene summary<textarea aria-label={`${scene.title} summary`} value={scene.summary} onChange={(event) => updateScene(scene.id, { summary: event.target.value })} placeholder="What changes in this scene?" /></label></div><label>Location<select value={scene.locationId} onChange={(event) => updateScene(scene.id, { locationId: event.target.value })}><option value="">Unspecified</option>{project.locations.map((location) => <option key={location.id} value={location.id}>{location.name}</option>)}</select></label>{sceneIndex > 0 && <label>Connection<select value={scene.transition} onChange={(event) => updateScene(scene.id, { transition: event.target.value as MovieScene['transition'] })}><option value="connected">Continue previous frame</option><option value="cut">Hard cut / new image</option></select></label>}<button className="secondary-button danger-button" onClick={() => { if (window.confirm(`Remove ${scene.title} and all its shots?`)) update((value) => ({ ...value, scenes: value.scenes.filter((item) => item.id !== scene.id) })) }}><Trash2 size={14} />Remove scene</button></div>{connected && <div className={`scene-continuity ${continuationSource ? 'ready' : 'waiting'}`}><span><strong>Automatic last-frame continuation</strong><small>{continuationSource ? `${previousScene.title}'s final rendered frame will become this scene's first frame.` : `Render ${previousScene.title}'s final shot first. This scene will stay blocked from handoff until that frame exists.`}</small></span><span>{continuationSource ? 'Ready' : 'Waiting'}</span></div>}<div className="shot-list">{scene.shots.map((shot, shotIndex) => {
+      const routes = [...new Set(scene.shots.map((shot, index) => routeName(resolveMovieShot(project, scene, shot, characterLibrary, connected && index === 0 ? continuationFrame : undefined).effectiveMode)))]
+      return <article className={`scene-card ${sceneOpen ? 'open' : ''}`} key={scene.id}><button className="scene-card-summary" aria-expanded={sceneOpen} aria-controls={`scene-body-${scene.id}`} onClick={() => setExpandedScenes((value) => value.includes(scene.id) ? value.filter((id) => id !== scene.id) : [...value, scene.id])}><span className="scene-index">{String(sceneIndex + 1).padStart(2, '0')}</span><span className="scene-summary-copy"><strong>{scene.title || `Scene ${sceneIndex + 1}`}</strong><span>{scene.summary || 'No scene summary yet.'}</span><small>{sceneLocation?.name || 'Location not set'} · {scene.shots.length} shot{scene.shots.length === 1 ? '' : 's'} · {formatDuration(sceneSeconds)}</small></span><span className="scene-card-facts"><span>{connected ? continuationFrame ? 'Connected · frame ready' : 'Connected · waiting for approval' : sceneIndex ? 'Hard cut' : 'Opening scene'}</span><span>{routes.length ? routes.join(' + ') : 'No routes'} · {castNames.length ? castNames.join(', ') : 'No cast assigned'}</span></span><ChevronDown className="scene-card-chevron" size={17} /></button>{sceneOpen && <div className="scene-card-body" id={`scene-body-${scene.id}`}><div className="scene-editor"><div><label>Scene title<input aria-label={`Scene ${sceneIndex + 1} title`} value={scene.title} onChange={(event) => updateScene(scene.id, { title: event.target.value })} /></label><label>Scene summary<textarea aria-label={`${scene.title} summary`} value={scene.summary} onChange={(event) => updateScene(scene.id, { summary: event.target.value })} placeholder="What changes in this scene?" /></label></div><label>Location<select value={scene.locationId} onChange={(event) => updateScene(scene.id, { locationId: event.target.value })}><option value="">Unspecified</option>{project.locations.map((location) => <option key={location.id} value={location.id}>{location.name}</option>)}</select></label>{sceneIndex > 0 && <label>Connection<select value={scene.transition} onChange={(event) => updateScene(scene.id, { transition: event.target.value as MovieScene['transition'] })}><option value="connected">Continue previous frame</option><option value="cut">Hard cut / new image</option></select></label>}<button className="secondary-button danger-button" onClick={() => { if (window.confirm(`Remove ${scene.title} and all its shots?`)) update((value) => ({ ...value, scenes: value.scenes.filter((item) => item.id !== scene.id) })) }}><Trash2 size={14} />Remove scene</button></div>{connected && <div className={`scene-continuity ${continuationFrame ? 'ready' : 'waiting'}`}><span><strong>Approved scene continuation</strong><small>{continuationFrame ? `${previousScene.title}'s locked continuity frame will become this scene's exact I2V opening frame.` : `Approve and lock ${previousScene.title} first. Its saved final frame will be prepared automatically.`}</small></span><span>{continuationFrame ? 'Ready' : 'Waiting'}</span></div>}<div className="shot-list">{scene.shots.map((shot, shotIndex) => {
           const expanded = expandedShots.includes(shot.id)
           const needsContinuation = connected && shotIndex === 0
-          const handoffBlocked = needsContinuation && !continuationSource
-          const continuation = needsContinuation && continuationSource ? { path: continuationSource, name: 'Previous-shot continuity frame', kind: 'image' as const } : undefined
+          const continuation = needsContinuation ? continuationFrame : undefined
           const resolved = resolveMovieShot(project, scene, shot, characterLibrary, continuation)
           const routeSummary = `${routeName(resolved.effectiveMode)} · ${resolved.references.filter((item) => item.purpose !== 'continuity').length} reusable ref${resolved.references.filter((item) => item.purpose !== 'continuity').length === 1 ? '' : 's'}`
-          return <div className={`movie-shot ${expanded ? 'expanded' : ''}`} key={shot.id}><div className="shot-number">{sceneIndex + 1}.{shotIndex + 1}</div><div className="shot-summary"><input aria-label="Shot title" value={shot.title} onChange={(event) => updateShot(scene.id, shot.id, { title: event.target.value })} /><span>{shot.prompt || 'No prompt yet'}</span><small>{shot.outputUrl ? 'Rendered' : shot.dialogue ? 'Dialogue added' : 'No dialogue'} · {shot.duration}s · <span className="effective-route" title={resolved.routeReason}>{routeSummary}</span> · {shot.characterIds.length} cast</small></div><div className="shot-row-actions"><button className="secondary-button" onClick={() => setExpandedShots((value) => value.includes(shot.id) ? value.filter((id) => id !== shot.id) : [...value, shot.id])}><Pencil size={14} />{expanded ? 'Close details' : 'Edit details'}</button><button className="primary-button" disabled={!shot.prompt.trim() || handoffBlocked || resolved.omittedReferences.length > 0} title={handoffBlocked ? `Render ${previousScene.title}'s final shot first` : resolved.omittedReferences.length ? 'Deselect references until no more than nine images remain' : resolved.routeReason} onClick={() => onOpenShot(shot, project.aspectRatio, resolved, { projectId: project.id, sceneId: scene.id, continuationSource: needsContinuation ? continuationSource : undefined })}>{handoffBlocked ? 'Waiting for prior scene' : resolved.omittedReferences.length ? 'Too many references' : 'Open in Create'}{!handoffBlocked && !resolved.omittedReferences.length && <ChevronRight size={14} />}</button><button className="icon-button" aria-label={`Remove ${shot.title}`} onClick={() => updateScene(scene.id, { shots: scene.shots.filter((item) => item.id !== shot.id) })}><Trash2 size={14} /></button></div>{expanded && <div className="shot-details"><div className="field-heading"><label htmlFor={`prompt-${shot.id}`}>Creative prompt</label>{assistantButton(`shot:${shot.id}`, 'Improve prompt', () => assistShot(scene, shot))}</div><SmartPromptEditor id={`prompt-${shot.id}`} value={shot.prompt} onChange={(prompt) => updateShot(scene.id, shot.id, { prompt })} options={smartOptionsForShot(scene, shot)} placeholder="Subject, action, camera, light, and sound… Type // for presets." /><details className="compiled-prompt"><summary>Compiled render prompt</summary><p>{resolved.compiledPrompt}</p><ul>{resolved.references.map((binding, index) => <li key={`${binding.file.path}-${index}`}><code>{`<Picture ${index + 1}>`}</code><span>{binding.label}</span></li>)}</ul></details>{resolved.omittedReferences.length > 0 && <div className="reference-limit-warning">{resolved.omittedReferences.length} reference{resolved.omittedReferences.length === 1 ? '' : 's'} exceed the 9-picture limit. Deselect images in Character Studio or remove shot/location references before rendering.</div>}<label>Exact dialogue<input value={shot.dialogue} onChange={(event) => updateShot(scene.id, shot.id, { dialogue: event.target.value })} placeholder="Exact spoken words, if any" /></label>{project.characters.length > 0 && <fieldset className="shot-cast-picker"><legend>Characters in this shot</legend><div>{project.characters.map((character) => <label key={character.id}><input type="checkbox" checked={shot.characterIds.includes(character.id)} onChange={(event) => updateShot(scene.id, shot.id, { characterIds: event.target.checked ? [...shot.characterIds, character.id] : shot.characterIds.filter((id) => id !== character.id) })} /><span>{character.name}</span></label>)}</div></fieldset>}<ShotReferencePicker shot={shot} onAdd={(kind) => void addShotReference(scene.id, shot, kind)} onRemove={(kind, index) => updateShot(scene.id, shot.id, kind === 'image' ? { referenceImages: (shot.referenceImages ?? []).filter((_, itemIndex) => itemIndex !== index) } : kind === 'video' ? { referenceVideos: (shot.referenceVideos ?? []).filter((_, itemIndex) => itemIndex !== index) } : { referenceAudios: (shot.referenceAudios ?? []).filter((_, itemIndex) => itemIndex !== index) })} /><div className="shot-detail-settings"><label>Seconds<input type="number" min="2" max="15" step="1" value={shot.duration} onChange={(event) => updateShot(scene.id, shot.id, { duration: clamp(Number(event.target.value), 2, 15) })} /></label><label>Preferred route<select value={shot.preferredMode ?? shot.mode} onChange={(event) => updateShot(scene.id, shot.id, { preferredMode: event.target.value as GenerationMode, mode: event.target.value as GenerationMode })}><option value="text">Text to video</option><option value="image">Image to video</option><option value="frames">First + last frames</option><option value="reference">Reference to video</option></select></label></div><small className="continuity-note">Effective route: {routeName(resolved.effectiveMode)}. {resolved.routeReason}</small></div>}</div>
+          return <div className={`movie-shot ${expanded ? 'expanded' : ''}`} key={shot.id}>
+            <div className="shot-number">{sceneIndex + 1}.{shotIndex + 1}</div>
+            <div className="shot-summary"><input aria-label="Shot title" value={shot.title} onChange={(event) => updateShot(scene.id, shot.id, { title: event.target.value })} /><span>{shot.prompt || 'No prompt yet'}</span><small>{shot.outputUrl ? 'Rendered' : shot.dialogue ? 'Dialogue added' : 'No dialogue'} · {shot.duration}s · <span className="effective-route" title={resolved.routeReason}>{routeSummary}</span> · {shot.characterIds.length} cast</small></div>
+            <div className="shot-row-actions"><button className="secondary-button" onClick={() => setExpandedShots((value) => value.includes(shot.id) ? value.filter((id) => id !== shot.id) : [...value, shot.id])}><Pencil size={14} />{expanded ? 'Close details' : 'Edit details'}</button><button className="icon-button" aria-label={`Remove ${shot.title}`} onClick={() => updateScene(scene.id, { shots: scene.shots.filter((item) => item.id !== shot.id) })}><Trash2 size={14} /></button></div>
+            {expanded && <div className="shot-details"><div className="field-heading"><label htmlFor={`prompt-${shot.id}`}>Creative prompt</label>{assistantButton(`shot:${shot.id}`, 'Improve prompt', () => assistShot(scene, shot))}</div><SmartPromptEditor id={`prompt-${shot.id}`} value={shot.prompt} onChange={(prompt) => updateShot(scene.id, shot.id, { prompt })} options={smartOptionsForShot(scene, shot)} placeholder="Subject, action, camera, light, and sound… Type // for presets." /><details className="compiled-prompt"><summary>Compiled render prompt</summary><p>{resolved.compiledPrompt}</p><ul>{resolved.references.map((binding, index) => <li key={`${binding.file.path}-${index}`}><code>{`<Picture ${index + 1}>`}</code><span>{binding.label}</span></li>)}</ul></details>{resolved.omittedReferences.length > 0 && <div className="reference-limit-warning">{resolved.omittedReferences.length} reference{resolved.omittedReferences.length === 1 ? '' : 's'} exceed the 9-picture limit. Deselect images in Character Studio or remove shot/location references before rendering.</div>}<label>Exact dialogue<input value={shot.dialogue} onChange={(event) => updateShot(scene.id, shot.id, { dialogue: event.target.value })} placeholder="Exact spoken words, if any" /></label>{project.characters.length > 0 && <fieldset className="shot-cast-picker"><legend>Characters in this shot</legend><div>{project.characters.map((character) => <label key={character.id}><input type="checkbox" checked={shot.characterIds.includes(character.id)} onChange={(event) => updateShot(scene.id, shot.id, { characterIds: event.target.checked ? [...shot.characterIds, character.id] : shot.characterIds.filter((id) => id !== character.id) })} /><span>{character.name}</span></label>)}</div></fieldset>}<ShotReferencePicker shot={shot} onAdd={(kind) => void addShotReference(scene.id, shot, kind)} onRemove={(kind, index) => updateShot(scene.id, shot.id, kind === 'image' ? { referenceImages: (shot.referenceImages ?? []).filter((_, itemIndex) => itemIndex !== index) } : kind === 'video' ? { referenceVideos: (shot.referenceVideos ?? []).filter((_, itemIndex) => itemIndex !== index) } : { referenceAudios: (shot.referenceAudios ?? []).filter((_, itemIndex) => itemIndex !== index) })} /><div className="shot-detail-settings"><label>Seconds<input type="number" min="2" max="15" step="1" value={shot.duration} onChange={(event) => updateShot(scene.id, shot.id, { duration: clamp(Number(event.target.value), 2, 15) })} /></label><label>Preferred route<select value={shot.preferredMode ?? shot.mode} onChange={(event) => updateShot(scene.id, shot.id, { preferredMode: event.target.value as GenerationMode, mode: event.target.value as GenerationMode })}><option value="text">Text to video</option><option value="image">Image to video</option><option value="frames">First + last frames</option><option value="reference">Reference to video</option></select></label></div><small className="continuity-note">Effective route: {routeName(resolved.effectiveMode)}. {resolved.routeReason}</small><small className="production-route-note">Rendering is controlled by the Production runner so queueing, output attachment, review, and continuity stay synchronized.</small></div>}
+          </div>
         })}</div><button className="add-shot-button" onClick={() => addShot(scene.id)}><Plus size={14} />Add shot</button></div>}</article>
       })}</div>}</section>}
-    {step === 'runner' && <ProductionRunner project={project} jobs={jobs} onEditPlan={() => setStep('shots')} onQueueShot={queueRunnerShot} onAssemble={assembleScene} onApprove={approveRunnerScene} onResetScene={(scene) => updateScene(scene.id, { stage: 'planned', shots: scene.shots.map((shot) => shot.outputUrl ? shot : { ...shot, stage: 'planned' }) })} onUpdateShot={updateShot} onUpdateProject={(change) => update((value) => ({ ...value, ...change }))} />}
+    {step === 'runner' && <ProductionRunner project={project} jobs={jobs} workingSeed={workingSeed} connected={connected} onEditPlan={() => setStep('shots')} onQueueShot={queueRunnerShot} onAssemble={assembleScene} onApprove={approveRunnerScene} onResetScene={(scene) => updateScene(scene.id, { stage: 'planned', previewUrl: undefined, continuityState: undefined, shots: scene.shots.map((shot) => shot.outputUrl ? shot : { ...shot, stage: 'planned' }) })} onRerenderShot={rerenderRunnerShot} onReplaceShot={replaceRunnerShotOutput} onUpdateShot={updateShot} onUpdateProject={(change) => update((value) => ({ ...value, ...change }))} />}
     {step === 'preview' && <MoviePreview clips={renderedClips} activeIndex={previewIndex} setActiveIndex={setPreviewIndex} />}
     </div><MovieCopilot project={project} input={chatInput} setInput={setChatInput} chatting={chatting} providerLabel={llm.label} ollamaAvailable={ollamaAvailable} pendingRevision={pendingChatRevision?.projectId === project.id ? pendingChatRevision : null} undoEntry={undoHistory[project.id]?.[0]} onSend={(question) => void sendMovieChat(question)} onNavigate={setStep} onApplyRevision={applyPendingChatRevision} onDiscardRevision={discardPendingChatRevision} onUndo={undoLastChatRevision} /></div>
 
@@ -490,7 +568,7 @@ type RenderedMovieClip = { scene: MovieScene; sceneIndex: number; shot: MovieSho
 type MovieChatResult = {
   reply?: unknown; changes?: unknown[]
   focusAreas?: unknown[]
-  projectPatch?: Partial<Pick<MovieProject, 'title' | 'targetRuntime' | 'computeBudgetMinutes' | 'aspectRatio' | 'genre' | 'visualStyle' | 'quality' | 'reviewGate' | 'story' | 'visualRules'>>
+  projectPatch?: Partial<Pick<MovieProject, 'title' | 'targetRuntime' | 'computeBudgetMinutes' | 'aspectRatio' | 'genre' | 'visualStyle' | 'story' | 'visualRules'>>
   characterUpserts?: Array<Partial<Pick<MovieCharacter, 'id' | 'name' | 'description' | 'wardrobe' | 'voiceNotes'>>>
   characterDeletes?: unknown[]
   locationUpserts?: Array<Partial<Pick<MovieLocation, 'id' | 'name' | 'description'>>>
@@ -539,24 +617,31 @@ function MovieRevisionReview({ revision, onApply, onDiscard }: { revision: Pendi
   </section>
 }
 
-function ProductionRunner({ project, jobs, onEditPlan, onQueueShot, onAssemble, onApprove, onResetScene, onUpdateShot, onUpdateProject }: {
+function ProductionRunner({ project, jobs, workingSeed, connected, onEditPlan, onQueueShot, onAssemble, onApprove, onResetScene, onRerenderShot, onReplaceShot, onUpdateShot, onUpdateProject }: {
   project: MovieProject
   jobs: GenerationJob[]
+  workingSeed: number
+  connected: boolean
   onEditPlan(): void
   onQueueShot(scene: MovieScene, shot: MovieShot): void
   onAssemble(scene: MovieScene): Promise<void>
   onApprove(scene: MovieScene): Promise<void>
   onResetScene(scene: MovieScene): void
+  onRerenderShot(scene: MovieScene, shot: MovieShot): void
+  onReplaceShot(scene: MovieScene, shot: MovieShot): Promise<void>
   onUpdateShot(sceneId: string, shotId: string, change: Partial<MovieShot>): void
   onUpdateProject(change: Partial<MovieProject>): void
 }) {
   const [assembling, setAssembling] = useState<string | null>(null)
-  const activeScene = project.scenes.find((scene) => scene.stage !== 'locked')
-  const activeMovieJobs = jobs.filter((job) => job.movieLink?.projectId === project.id && ['queued', 'running'].includes(job.status))
+  const [editingShotId, setEditingShotId] = useState<string | null>(null)
+  const activeMovieJobs = useMemo(() => jobs.filter((job) => job.movieLink?.projectId === project.id && ['queued', 'running'].includes(job.status)), [jobs, project.id])
 
   useEffect(() => {
+    if (!connected || project.status === 'paused') return
     const scene = project.scenes.find((item) => item.stage === 'rendering')
-    if (!scene || activeMovieJobs.length) return
+    if (!scene) return
+    const activeSceneJobs = activeMovieJobs.filter((job) => job.movieLink?.sceneId === scene.id && scene.shots.some((shot) => shot.id === job.movieLink?.shotId))
+    if (activeSceneJobs.length) return
     if (scene.shots.length && scene.shots.every((shot) => Boolean(shot.outputUrl))) {
       if (!scene.previewUrl && assembling !== scene.id) {
         setAssembling(scene.id)
@@ -564,29 +649,34 @@ function ProductionRunner({ project, jobs, onEditPlan, onQueueShot, onAssemble, 
       }
       return
     }
-    const nextIndex = scene.shots.findIndex((shot, index) => !shot.outputUrl && index > 0 && Boolean(scene.shots[index - 1].outputUrl) && shot.stage === 'planned')
+    const nextIndex = scene.shots.findIndex((shot, index) => !shot.outputUrl && index > 0 && Boolean(scene.shots[index - 1].outputUrl) && shot.stage === 'planned' && shot.prompt.trim())
     if (nextIndex >= 0) onQueueShot(scene, scene.shots[nextIndex])
-  }, [project.scenes, activeMovieJobs.length, assembling, onAssemble, onQueueShot])
+  }, [project.scenes, project.status, connected, activeMovieJobs, assembling, onAssemble, onQueueShot])
 
   if (!project.scenes.length) return <section className="movie-stage production-runner"><div className="movie-stage-heading"><div><Clapperboard size={18} /><span><strong>Guided production runner</strong><small>Plan scenes and shots before production can begin.</small></span></div></div><button className="primary-button" onClick={onEditPlan}>Open shot plan<ChevronRight size={15} /></button></section>
-  const runSettings = project.productionSettings ?? { resolution: project.aspectRatio === '9:16' ? '768x1344' : project.aspectRatio === '1:1' ? '768x768' : '1344x768', turbo: 'off' as const, steps: 30 }
+  const runSettings = productionSettingsFor(project, workingSeed)
   const saveRunSettings = (change: Partial<typeof runSettings>) => onUpdateProject({ productionSettings: { ...runSettings, ...change } })
-  return <section className="movie-stage production-runner"><div className="movie-stage-heading"><div><Clapperboard size={18} /><span><strong>Guided production runner</strong><small>References, prompts, queueing, output attachment, and scene review are managed here.</small></span></div><label className="no-dialogue-toggle"><input type="checkbox" checked={Boolean(project.autoContinueCleanScenes)} onChange={(event) => onUpdateProject({ autoContinueCleanScenes: event.target.checked })} /><span><strong>Auto-continue clean scenes</strong><small>After approval, prepare the next ready scene.</small></span></label></div>
-    <fieldset className="production-run-settings"><legend>Whole-run render settings</legend><label>Resolution<select value={runSettings.resolution} onChange={(event) => saveRunSettings({ resolution: event.target.value })}>{minimaxRunResolutions.map((resolution) => <option key={resolution} value={resolution}>{resolution.replace('x', ' × ')}</option>)}</select></label><label>Speed<select value={runSettings.turbo} onChange={(event) => saveRunSettings({ turbo: event.target.value as 'off' | '4' | '8' })}><option value="off">Quality</option><option value="4">Turbo 4</option><option value="8">Turbo 8</option></select></label><label>Sampling steps<input type="number" min="1" max="100" value={runSettings.steps} onChange={(event) => saveRunSettings({ steps: Math.max(1, Math.min(100, Number(event.target.value) || 1)) })} /></label><small>All supported Ref2VA / MiniMax H3 canvases are available here and applied to every newly queued shot.</small></fieldset>
+  return <section className="movie-stage production-runner"><div className="movie-stage-heading"><div><Clapperboard size={18} /><span><strong>Guided production runner</strong><small>References, prompts, queueing, output attachment, and scene review are managed here.</small></span></div><label className="no-dialogue-toggle"><input type="checkbox" checked={Boolean(project.autoContinueCleanScenes)} onChange={(event) => onUpdateProject({ autoContinueCleanScenes: event.target.checked })} /><span><strong>Auto-continue clean scenes</strong><small>Automatically start the next ready scene after approval.</small></span></label></div>
+    <fieldset className="production-run-settings"><legend>Whole-run render settings</legend><label>Resolution<select value={runSettings.resolution} onChange={(event) => saveRunSettings({ resolution: event.target.value })}>{MINIMAX_VIDEO_RESOLUTIONS.map((resolution) => <option key={resolution} value={resolution}>{resolution.replace('x', ' × ')}</option>)}</select></label><label>Speed<select value={runSettings.turbo} onChange={(event) => { const turbo = event.target.value as 'off' | '4' | '8'; saveRunSettings({ turbo, steps: turbo === '8' ? 8 : turbo === '4' ? 4 : runSettings.steps <= 8 ? 30 : runSettings.steps }) }}><option value="off">Quality</option><option value="4">Turbo 4</option><option value="8">Turbo 8</option></select></label><label>Sampling steps<input type="number" min="1" max="100" value={runSettings.steps} onChange={(event) => saveRunSettings({ steps: Math.max(1, Math.min(100, Number(event.target.value) || 1)) })} /></label><label>Run seed<span className="production-seed-control"><input type="number" min="0" max="2147483646" value={runSettings.seed ?? workingSeed} onChange={(event) => saveRunSettings({ seed: Math.max(0, Math.min(2147483646, Math.floor(Number(event.target.value) || 0))) })} /><button type="button" className="secondary-button" onClick={() => saveRunSettings({ seed: workingSeed })} disabled={runSettings.seed === workingSeed}>Use working seed</button></span></label><label className="production-setting-toggle"><input type="checkbox" checked={Boolean(runSettings.noDialogue)} onChange={(event) => saveRunSettings({ noDialogue: event.target.checked })} /><span>No dialogue</span></label><label className="production-setting-toggle"><input type="checkbox" checked={Boolean(runSettings.naturalMovement)} onChange={(event) => saveRunSettings({ naturalMovement: event.target.checked })} /><span>Natural movement</span></label><small>All Ref2VA / MiniMax H3 canvases use the same shared resolution source. Seed {runSettings.seed ?? workingSeed} is locked for every shot in this run.</small></fieldset>
     <div className="production-state-legend" aria-label="Production status"><span>Planned</span><span>Ready</span><span>Rendering</span><span>Review</span><span>Approved</span><span>Locked</span></div>
     {project.scenes.map((scene, sceneIndex) => {
       const allRendered = scene.shots.length > 0 && scene.shots.every((shot) => Boolean(shot.outputUrl))
-      const sceneState = scene.stage ?? (allRendered ? 'review' : 'planned')
       const canStart = sceneIndex === 0 || project.scenes[sceneIndex - 1].stage === 'locked'
-      // A historical queued/running job can survive a restart even when its
-      // planner shot is still Planned. Do not let that orphaned job deadlock a
-      // new scene; only an actively-rendering shot in this exact scene blocks.
-      const sceneHasLiveRender = activeMovieJobs.some((job) => job.movieLink?.sceneId === scene.id && scene.shots.some((shot) => shot.id === job.movieLink?.shotId && shot.stage === 'rendering'))
+      const sceneHasLiveRender = activeMovieJobs.some((job) => job.movieLink?.sceneId === scene.id && scene.shots.some((shot) => shot.id === job.movieLink?.shotId))
       const firstPending = scene.shots.find((shot) => !shot.outputUrl)
+      const missingPrompts = scene.shots.filter((shot) => !shot.prompt.trim()).length
+      const ready = scene.shots.length > 0 && Boolean(firstPending) && canStart && !missingPrompts && connected && project.status !== 'paused'
+      const sceneState = sceneHasLiveRender ? 'rendering' : scene.stage === 'rendering' || scene.stage === 'review' || scene.stage === 'approved' || scene.stage === 'locked' ? scene.stage : allRendered ? 'review' : ready ? 'ready' : 'planned'
+      const isAssembling = assembling === scene.id
+      const blocker = project.status === 'paused' ? 'Resume the movie to start production.' : !connected ? 'Start ComfyUI and verify the Local engine connection.' : !scene.shots.length ? 'Add at least one shot in the Shot plan.' : !canStart ? 'Approve and lock the preceding scene first.' : missingPrompts ? `${missingPrompts} shot prompt${missingPrompts === 1 ? ' is' : 's are'} missing.` : sceneHasLiveRender ? 'ComfyUI is processing this scene.' : undefined
       return <article key={scene.id} className={`production-scene production-${sceneState}`}><header><div><span>Scene {sceneIndex + 1}</span><strong>{scene.title}</strong><small>{scene.summary || 'No scene summary'} · {scene.shots.length} shots</small></div><em>{sceneState}</em></header>
         {scene.previewUrl && <video className="scene-review-preview" src={scene.previewUrl} controls />}
-        <div className="production-shot-list">{scene.shots.map((shot, shotIndex) => { const job = jobs.find((item) => item.movieLink?.projectId === project.id && item.movieLink?.sceneId === scene.id && item.movieLink?.shotId === shot.id); const state = shot.stage === 'rendered' ? 'review' : shot.stage; return <div key={shot.id} className="production-shot"><span>{sceneIndex + 1}.{shotIndex + 1}</span><div><strong>{shot.title}</strong><small>{state} · {job?.status === 'running' ? `${Math.round(job.progress)}% · ${job.progressLabel ?? 'Rendering'}` : shot.outputUrl ? 'Output attached' : `${shot.duration}s · awaiting render`}</small></div>{shot.outputUrl && <button className="secondary-button" onClick={() => onUpdateShot(scene.id, shot.id, { outputUrl: undefined, renderedAt: undefined, stage: 'planned' })}><RefreshCw size={14} />Rerender</button>}</div> })}</div>
-        <footer>{sceneState === 'locked' ? <small>Locked continuity: {scene.continuityState}</small> : sceneState === 'review' ? <><small>{scene.continuityState ?? 'Review the assembled scene, then lock its continuity.'}</small><button className="primary-button" onClick={() => void onApprove(scene)}><Check size={15} />Approve Scene & Continue</button></> : <><small>{sceneHasLiveRender ? 'ComfyUI is processing this scene’s current production shot.' : sceneState === 'rendering' ? 'No active ComfyUI job was found for this scene. Reset it and start again.' : !canStart ? 'Lock the preceding scene before beginning this one.' : firstPending ? 'All references and prompt instructions resolve automatically at render time.' : 'Preparing review.'}</small>{sceneState === 'rendering' && !sceneHasLiveRender ? <button className="secondary-button" onClick={() => onResetScene(scene)}><RotateCcw size={15} />Reset scene</button> : firstPending && <button className="primary-button" disabled={!canStart || sceneHasLiveRender} onClick={() => onQueueShot(scene, firstPending)}><CirclePlay size={15} />Start scene</button>}</>}</footer>
+        <div className="production-shot-list">{scene.shots.map((shot, shotIndex) => {
+          const job = jobs.find((item) => item.movieLink?.projectId === project.id && item.movieLink?.sceneId === scene.id && item.movieLink?.shotId === shot.id)
+          const shotState = sceneState === 'locked' && shot.outputUrl ? 'locked' : job && ['queued', 'running'].includes(job.status) ? 'rendering' : shot.outputUrl ? 'review' : ready && firstPending?.id === shot.id ? 'ready' : 'planned'
+          return <div key={shot.id} className={`production-shot production-shot-${shotState}`}><span>{sceneIndex + 1}.{shotIndex + 1}</span><div><strong>{shot.title}</strong><small>{shotState} · {job?.status === 'queued' ? `Queue position ${job.queuePosition ?? 'pending'}` : job?.status === 'running' ? `${Math.round(job.progress)}% · ${job.progressLabel ?? 'Rendering'}` : shot.outputUrl ? 'Output attached' : `${shot.duration}s · awaiting render`}</small></div>{sceneState !== 'locked' && <div className="production-shot-actions"><button className="secondary-button" onClick={() => setEditingShotId((value) => value === shot.id ? null : shot.id)}><Pencil size={13} />{editingShotId === shot.id ? 'Close prompt' : 'Revise prompt'}</button>{shot.outputUrl && <><button className="secondary-button" onClick={() => void onReplaceShot(scene, shot)}><Film size={13} />Replace</button><button className="secondary-button" onClick={() => onRerenderShot(scene, shot)}><RefreshCw size={13} />Rerender</button></>}</div>}{editingShotId === shot.id && sceneState !== 'locked' && <label className="production-shot-prompt">Production prompt<textarea value={shot.prompt} onChange={(event) => onUpdateShot(scene.id, shot.id, { prompt: event.target.value })} /><small>Changes are saved immediately and will be compiled with the current cast, wardrobe, location, reference, and continuity bindings at render time.</small></label>}</div>
+        })}</div>
+        <footer>{sceneState === 'locked' ? <small>Locked continuity: {scene.continuityState}</small> : sceneState === 'approved' ? <small className="production-busy"><LoaderCircle className="spin" size={14} />Saving the approved final continuity frame…</small> : sceneState === 'review' ? <><small>{scene.continuityState ?? 'Review the assembled scene, revise or replace individual shots if needed, then lock continuity.'}</small><button className="primary-button" onClick={() => void onApprove(scene)}><Check size={15} />Approve Scene & Continue</button></> : isAssembling ? <small className="production-busy"><LoaderCircle className="spin" size={14} />Assembling the finished shots into the scene preview…</small> : sceneState === 'rendering' ? <><small>{sceneHasLiveRender ? 'ComfyUI is processing this scene’s current production shot.' : 'No active ComfyUI job was found. Reset the runner state to continue.'}</small>{!sceneHasLiveRender && <button className="secondary-button" onClick={() => onResetScene(scene)}><RotateCcw size={15} />Reset scene</button>}</> : <><small>{blocker ?? 'Ready. References and the final model prompt will resolve automatically when production starts.'}</small>{firstPending && <button className="primary-button" disabled={Boolean(blocker)} title={blocker} onClick={() => onQueueShot(scene, firstPending)}><CirclePlay size={15} />Start scene</button>}</>}</footer>
       </article>
     })}
   </section>
@@ -605,8 +695,6 @@ function normalizeProjectPatch(raw: MovieChatResult['projectPatch'], current: Mo
     targetRuntime: clamp(Number(raw.targetRuntime), 10, 3600), computeBudgetMinutes: clamp(Number(raw.computeBudgetMinutes), 10, 100000),
     aspectRatio: ['16:9', '9:16', '1:1'].includes(raw.aspectRatio ?? '') ? raw.aspectRatio : current.aspectRatio,
     genre: typeof raw.genre === 'string' ? raw.genre : current.genre, visualStyle: typeof raw.visualStyle === 'string' ? raw.visualStyle : current.visualStyle,
-    quality: ['preview', 'balanced', 'maximum'].includes(raw.quality ?? '') ? raw.quality : current.quality,
-    reviewGate: ['shot', 'scene', 'batch'].includes(raw.reviewGate ?? '') ? raw.reviewGate : current.reviewGate,
     story: typeof raw.story === 'string' ? raw.story : current.story, visualRules: typeof raw.visualRules === 'string' ? raw.visualRules : current.visualRules,
   }
 }
@@ -717,7 +805,7 @@ function buildMovieRevisionDiffs(before: MovieProject, after: MovieProject): Mov
     diffs.push({ id: `${area}-${label}-${diffs.length}`, area, kind: 'change', label, before: left, after: right })
   }
   const projectFields: Array<[keyof MovieProject, string]> = [
-    ['title', 'Project title'], ['targetRuntime', 'Target runtime'], ['computeBudgetMinutes', 'Compute budget'], ['aspectRatio', 'Aspect ratio'], ['genre', 'Genre'], ['visualStyle', 'Visual direction'], ['quality', 'Quality target'], ['reviewGate', 'Review gate'], ['story', 'Story treatment'], ['visualRules', 'Continuity rules'],
+    ['title', 'Project title'], ['targetRuntime', 'Target runtime'], ['computeBudgetMinutes', 'Compute budget'], ['aspectRatio', 'Aspect ratio'], ['genre', 'Genre'], ['visualStyle', 'Visual direction'], ['story', 'Story treatment'], ['visualRules', 'Continuity rules'],
   ]
   projectFields.forEach(([field, label]) => addChange(field === 'visualRules' ? 'bible' : 'setup', label, before[field], after[field]))
 

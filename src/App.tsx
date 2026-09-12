@@ -61,6 +61,7 @@ import { buildLtx25Workflow } from './lib/ltx25Workflow'
 import { buildZImage } from './lib/zimage'
 import { attentionBackendLabel, resolveAttentionBackend } from './lib/attentionBackend'
 import { hasSensitivePreviewWording } from './lib/previewSafety'
+import { auditH3Prompt } from './lib/promptAudit'
 import { appendLtxVisionGrounding, buildLtxImageHandoffPrompt } from './lib/ltxImageHandoff'
 import { ACE_STEP_REQUIRED_NODES, buildAceStepWorkflow, inferAceStepSelections } from './lib/aceStepWorkflow'
 import { fitWholeCharacter, prepareImage } from './lib/imageCrop'
@@ -69,8 +70,10 @@ import { choices, type ObjectInfo } from './lib/comfyInfo'
 import { useLivePreview, type LivePreview, type LiveProgress } from './lib/useLivePreview'
 import { RenderSize } from './components/RenderSize'
 import { ImageCrop } from './components/ImageCrop'
+import { ReferenceHandoffInspector } from './components/ReferenceHandoffInspector'
 import { ZImageWorkspace } from './components/ZImageWorkspace'
 import { ClipEditor } from './components/ClipEditor'
+import { ClipMasterBeta, ClipMasterLaunchpad } from './components/ClipMasterBeta'
 import { FrameBookmarkStudio, type BookmarkVideo } from './components/FrameBookmarkStudio'
 import { MoviePlanner } from './components/MoviePlanner'
 import { Ltx25Workspace } from './components/Ltx25Workspace'
@@ -85,7 +88,7 @@ import { AiChatHead, type CopilotWorkspaceContext } from './components/AiChatHea
 import { SmartPromptEditor, type SmartPromptEditorHandle } from './components/SmartPromptEditor'
 import { CharacterDialogueModal, type CharacterDialogueDraft } from './components/CharacterDialogueModal'
 import { RenderConstruction } from './components/RenderConstruction'
-import { CHARACTER_LIBRARY_EVENT, characterReferences, loadCharacterProjects, updateCharacterProject } from './lib/characterLibrary'
+import { CHARACTER_LIBRARY_EVENT, characterIdentityReferences, characterReferences, loadCharacterProjects, updateCharacterProject } from './lib/characterLibrary'
 import { loadWardrobeProjects, wardrobeReferences, WARDROBE_LIBRARY_EVENT } from './lib/wardrobeLibrary'
 import { loadLocationProjects, locationReferences, updateLocationProject, LOCATION_LIBRARY_EVENT } from './lib/locationLibrary'
 import { loadHairStyleProjects } from './lib/hairLibrary'
@@ -105,6 +108,7 @@ import type {
   LocationProject,
   LanStatus,
   MediaFile,
+  ClipItem,
   MediaKind,
   ModelFile,
   ModelKind,
@@ -141,6 +145,7 @@ type PersistedWorkspace = {
   loraStrength: number
   userLoras: Array<{ name: string; strength: number }>
   seed: number
+  ref2vaSeed: number
   seedLocked: boolean
   advanced: boolean
   liveEnabled: boolean
@@ -192,10 +197,11 @@ function randomH3Seed(previous?: number) {
   return next === previous ? (next + 1) % H3_RANDOM_SEED_LIMIT : next
 }
 
+const defaultH3Seed = randomH3Seed()
 const workspaceDefaults: PersistedWorkspace = {
   mode: 'text', prompt: '', duration: 5, resolution: '1056x608', turbo: 'off', steps: 30,
   sampler: 'res_multistep', scheduler: 'simple', experimentalSampling: false, refImageSize: 'match', noDialogue: true, naturalMovement: true, clothingPolicy: 'wardrobe',
-  sigmaShiftMode: 'model', shiftVideo: 12, shiftAudio: 3, loraStrength: 1, userLoras: [{ name: '', strength: 1 }, { name: '', strength: 1 }, { name: '', strength: 1 }], seed: randomH3Seed(), seedLocked: true,
+  sigmaShiftMode: 'model', shiftVideo: 12, shiftAudio: 3, loraStrength: 1, userLoras: [{ name: '', strength: 1 }, { name: '', strength: 1 }, { name: '', strength: 1 }], seed: defaultH3Seed, ref2vaSeed: defaultH3Seed, seedLocked: true,
   advanced: false, liveEnabled: true, livePreviewMode: 'standard', upscaleMode: 'off', textEncoderPreference: 'fast', turbo8Profile: 'balanced', rtxModel: '', firstFrame: null,
   lastFrame: null, referenceImages: [], referenceVideos: [], referenceAudios: [], selectedReferenceCharacterIds: [], selectedReferenceLocationIds: [], activeJobId: null, movieHandoff: null,
 }
@@ -261,6 +267,9 @@ function readWorkspace(): PersistedWorkspace {
   try {
     const stored = JSON.parse(localStorage.getItem('minimax.workspace') ?? '{}') as Partial<PersistedWorkspace>
     const workspace = { ...workspaceDefaults, ...stored }
+    // Older workspaces had a single seed. Treat that value as the first
+    // authoritative Ref2VA seed so the working-seed indicator starts aligned.
+    workspace.ref2vaSeed = Number.isFinite(Number(stored.ref2vaSeed)) ? Number(stored.ref2vaSeed) : Number(workspace.seed)
     workspace.userLoras = Array.isArray(stored.userLoras) ? stored.userLoras.slice(0, 3).map((item) => ({ name: typeof item?.name === 'string' ? item.name : '', strength: Math.max(0, Math.min(2, Number(item?.strength) || 1)) })) : workspaceDefaults.userLoras.map((item) => ({ ...item }))
     while (workspace.userLoras.length < 3) workspace.userLoras.push({ name: '', strength: 1 })
     // Only migrate workspaces that existed before the experimental opt-in was
@@ -324,6 +333,14 @@ function playableOutputUrl(value?: string) {
   }
 }
 
+function localPathFromMediaUrl(value?: string) {
+  if (!value) return null
+  try {
+    const url = new URL(value)
+    return url.protocol === 'minimax-media:' && (url.hostname === 'selected' || url.hostname === 'local') ? url.searchParams.get('path') : null
+  } catch { return null }
+}
+
 const initialJobs = (): GenerationJob[] => {
   try {
     const stored = JSON.parse(localStorage.getItem('minimax.jobs') ?? '[]') as GenerationJob[]
@@ -333,11 +350,12 @@ const initialJobs = (): GenerationJob[] => {
   }
 }
 
-function recordMovieOutput(link: MovieLink | undefined, outputUrl: string) {
+function recordMovieOutput(link: MovieLink | undefined, outputUrl: string, outputPath?: string, renderJobId?: string) {
   if (!link) return
   try {
     const projects = JSON.parse(localStorage.getItem('minimax.movie-projects') ?? '[]') as MovieProject[]
-    const next = projects.map((project) => project.id !== link.projectId ? project : { ...project, updatedAt: Date.now(), scenes: project.scenes.map((scene) => scene.id !== link.sceneId ? scene : { ...scene, stage: 'rendering' as const, shots: scene.shots.map((shot) => shot.id !== link.shotId ? shot : { ...shot, outputUrl, renderedAt: Date.now(), stage: 'review' as const }) }) })
+    const localPath = outputPath ?? localPathFromMediaUrl(outputUrl) ?? undefined
+    const next = projects.map((project) => project.id !== link.projectId ? project : { ...project, updatedAt: Date.now(), scenes: project.scenes.map((scene) => scene.id !== link.sceneId ? scene : { ...scene, stage: 'rendering' as const, previewUrl: undefined, shots: scene.shots.map((shot) => shot.id !== link.shotId ? shot : { ...shot, outputUrl, outputPath: localPath, renderedAt: Date.now(), renderJobId, stage: 'review' as const }) }) })
     localStorage.setItem('minimax.movie-projects', JSON.stringify(next))
     window.dispatchEvent(new CustomEvent('minimax-movie-production-updated'))
   } catch { /* Keep the completed generation even if legacy movie data cannot be updated. */ }
@@ -357,9 +375,10 @@ async function extractAutomatedReferenceSet(kind: 'character' | 'location', proj
   if (!projectId || !source) return null
   try {
     const positions = [0.05, .25, .5, .75, .95].map((ratio) => Math.max(0, Math.min(duration - .04, duration * ratio)))
-    const references = await Promise.all(positions.map(async (position) => {
+    const characterTypes = ['full-body', 'face', 'three-quarter', 'profile', 'back'] as const
+    const references = await Promise.all(positions.map(async (position, index) => {
       const result = await window.minimax.extractVideoFrame(source, position, settings.outputDirectory, settings.ffmpegPath)
-      return { ...result, kind: 'image' as const, preview: await window.minimax.mediaUrl(result.path) }
+      return { ...result, kind: 'image' as const, referenceType: kind === 'character' ? characterTypes[index] : undefined, preview: await window.minimax.mediaUrl(result.path) }
     }))
     if (kind === 'character') updateCharacterProject(projectId, { referenceMode: 'set', referenceImages: references, selectedReferencePaths: undefined })
     else updateLocationProject(projectId, { referenceMode: 'set', referenceImages: references, selectedReferencePaths: undefined })
@@ -494,7 +513,9 @@ function composeH3Prompt(input: {
     for (const binding of numbered.filter((binding) => binding.purpose === 'generic')) {
       const subject = `<Subject ${subjectNumber++}>`
       subjectLines.push(`${subject} is the visual planning reference in <Picture ${binding.number}>.`)
-      retentionLines.push(`${subject} (appears where relevant): weak_reference - use only its requested composition, style, or visual planning cues.`)
+      retentionLines.push(binding.file.referenceRetention === 'preserve'
+        ? `${subject} (appears where relevant): fully_preserved - retain the explicitly assigned ${binding.file.referenceRole?.replace('-', ' or ') ?? 'visual'} attributes from <Picture ${binding.number}> without copying its unassigned background or unrelated details.`
+        : `${subject} (appears where relevant): weak_reference - use only its requested composition, style, or visual planning cues.`)
     }
     const sourceLines = numbered.filter((binding) => !binding.characterId && binding.purpose !== 'location' && binding.purpose !== 'generic').map((binding) => `<Picture ${binding.number}> is used only as ${binding.label}.`)
     const videoDefinitions = Array.from({ length: input.referenceVideoCount ?? 0 }, (_, index) => `<Video ${index + 1}> is a temporal reference for the target video. Use it only for requested action timing, camera movement, cut rhythm, or motion qualities; it is not a source-video edit or continuation unless the detailed description explicitly says so.`)
@@ -569,13 +590,17 @@ function modelLabel(model?: string) {
   return model.replace(/\.safetensors$/i, '').replace(/^minimax_h3_/i, 'H3 ').replace(/^ltx-2\.5-/i, 'LTX 2.5 ').replace(/[_-]+/g, ' ')
 }
 
-function resolveRenderReferenceImages(files: MediaFile[], bindings: MovieReferenceBinding[], clothingPolicy: 'wardrobe' | 'underwear' | 'unrestricted') {
-  if (!bindings.length) return files
+function resolveRenderReferenceBindings(files: MediaFile[], bindings: MovieReferenceBinding[], clothingPolicy: 'wardrobe' | 'underwear' | 'unrestricted') {
   const activeBindings = clothingPolicy === 'wardrobe' ? bindings : bindings.filter((binding) => binding.purpose !== 'wardrobe')
   const libraryPaths = new Set(bindings.map((binding) => binding.file.path))
-  const assigned = activeBindings.map((binding) => files.find((file) => file.path === binding.file.path) ?? binding.file)
+  const roleForPurpose = (purpose: MovieReferenceBinding['purpose']): NonNullable<MediaFile['referenceRole']> => purpose === 'wardrobe' ? 'wardrobe' : purpose === 'accessory' || purpose === 'product' ? 'prop' : purpose === 'location' ? 'location' : purpose === 'style' ? 'lighting-style' : 'subject'
+  const assigned = activeBindings.map((binding) => {
+    const source = files.find((file) => file.path === binding.file.path) ?? binding.file
+    return { ...binding, file: { ...source, referenceRole: source.referenceRole ?? roleForPurpose(binding.purpose), referenceRetention: source.referenceRetention ?? 'preserve' as const } }
+  })
   const standalone = files.filter((file) => !libraryPaths.has(file.path))
-  return [...assigned, ...standalone].slice(0, 9)
+  const roleLabels: Record<NonNullable<MediaFile['referenceRole']>, string> = { subject: 'subject or identity', wardrobe: 'wardrobe', prop: 'prop or product', location: 'location or set', composition: 'composition or pose', 'lighting-style': 'lighting or visual style' }
+  return [...assigned, ...standalone.map((file) => ({ file, purpose: 'generic' as const, label: `Shot reference: ${roleLabels[file.referenceRole ?? 'composition']} — ${file.name}`, source: 'shot' as const }))].slice(0, 9)
 }
 
 function App() {
@@ -626,6 +651,7 @@ function App() {
   const rtxModels = choices(info, 'UpscaleModelLoader', 'model_name')
   const [rtxModel, setRtxModel] = useState(persisted.rtxModel)
   const [seed, setSeed] = useState(persisted.seed)
+  const [ref2vaSeed, setRef2vaSeed] = useState(persisted.ref2vaSeed)
   const [seedLocked, setSeedLocked] = useState(persisted.seedLocked)
   const [advanced, setAdvanced] = useState(persisted.advanced)
   const [firstFrame, setFirstFrame] = useState<MediaFile | null>(persisted.firstFrame)
@@ -651,6 +677,7 @@ function App() {
   const [diagnosticRunning, setDiagnosticRunning] = useState(false)
   const [cancellingIds, setCancellingIds] = useState<Set<string>>(() => new Set())
   const cancellationRequests = useRef(new Set<string>())
+  const generateRef = useRef<((target?: 'video' | 'image') => Promise<void>) | null>(null)
   const mediaHydrated = useRef(false)
   const [notice, setNotice] = useState<{ tone: 'error' | 'success' | 'neutral'; text: string } | null>(null)
   const [legacyMigration, setLegacyMigration] = useState<{ available: boolean; migrated: boolean; migratedAt?: string; needsBrowserStorageRepair: boolean } | null>(null)
@@ -670,6 +697,7 @@ function App() {
   const [lanStatus, setLanStatus] = useState<LanStatus>({ running: false })
   const [lanQr, setLanQr] = useState<{ mobile: string; desktop: string }>({ mobile: '', desktop: '' })
   const [videoClipDraft, setVideoClipDraft] = useState<{ source: MediaFile; replaceIndex?: number } | null>(null)
+  const [clipMasterClip, setClipMasterClip] = useState<ClipItem | null>(null)
   const [createResetKey, setCreateResetKey] = useState(0)
   const [ltxResetKey, setLtxResetKey] = useState(0)
   const [zImageResetKey, setZImageResetKey] = useState(0)
@@ -876,14 +904,14 @@ function App() {
   useEffect(() => {
     const workspace: PersistedWorkspace = {
       mode, prompt, duration, resolution, turbo, steps, sampler, scheduler, experimentalSampling, refImageSize, noDialogue, naturalMovement, clothingPolicy,
-      sigmaShiftMode, shiftVideo, shiftAudio, loraStrength, userLoras, seed, seedLocked, advanced, liveEnabled, livePreviewMode,
+      sigmaShiftMode, shiftVideo, shiftAudio, loraStrength, userLoras, seed, ref2vaSeed, seedLocked, advanced, liveEnabled, livePreviewMode,
       upscaleMode, turbo8Profile, rtxModel, firstFrame: withoutPreview(firstFrame), lastFrame: withoutPreview(lastFrame),
       referenceImages: referenceImages.map((file) => withoutPreview(file)!),
       referenceVideos: referenceVideos.map((file) => withoutPreview(file)!), textEncoderPreference,
       referenceAudios: referenceAudios.map((file) => withoutPreview(file)!), selectedReferenceCharacterIds, selectedReferenceLocationIds, activeJobId, movieHandoff,
     }
     localStorage.setItem('minimax.workspace', JSON.stringify(workspace))
-  }, [activeJobId, advanced, clothingPolicy, duration, experimentalSampling, firstFrame, lastFrame, liveEnabled, livePreviewMode, loraStrength, mode, movieHandoff, naturalMovement, noDialogue, prompt, refImageSize, referenceAudios, referenceImages, referenceVideos, resolution, rtxModel, sampler, scheduler, seed, seedLocked, selectedReferenceCharacterIds, selectedReferenceLocationIds, shiftAudio, shiftVideo, sigmaShiftMode, steps, textEncoderPreference, turbo, turbo8Profile, upscaleMode, userLoras])
+  }, [activeJobId, advanced, clothingPolicy, duration, experimentalSampling, firstFrame, lastFrame, liveEnabled, livePreviewMode, loraStrength, mode, movieHandoff, naturalMovement, noDialogue, prompt, refImageSize, referenceAudios, referenceImages, referenceVideos, ref2vaSeed, resolution, rtxModel, sampler, scheduler, seed, seedLocked, selectedReferenceCharacterIds, selectedReferenceLocationIds, shiftAudio, shiftVideo, sigmaShiftMode, steps, textEncoderPreference, turbo, turbo8Profile, upscaleMode, userLoras])
 
   useEffect(() => {
     if (!settings || mediaHydrated.current) return
@@ -934,7 +962,7 @@ function App() {
             // Store a playable local URL on the planner while retaining the
             // exact filesystem path on the job for frame extraction.
             const localUrl = localOutput ? await window.minimax.mediaUrl(localOutput) : outputUrl
-            recordMovieOutput(job.movieLink, localUrl)
+            recordMovieOutput(job.movieLink, localUrl, localOutput ?? undefined, job.id)
             let extractionError: string | null = null
             if (job.characterProjectId) {
               recordCharacterTurntable(job.characterProjectId, localOutput ?? outputUrl)
@@ -949,7 +977,7 @@ function App() {
             const outputFile = extractOutputFile(history, promptId, mediaType)
             const localOutput = outputFile ? await window.minimax.resolveOutput(settings.outputDirectory, outputFile) : null
             const localUrl = localOutput ? await window.minimax.mediaUrl(localOutput) : null
-            if (localUrl) recordMovieOutput(job.movieLink, localUrl)
+            if (localUrl) recordMovieOutput(job.movieLink, localUrl, localOutput ?? undefined, job.id)
             if (localOutput) recordCharacterTurntable(job.characterProjectId, localOutput)
             if (localOutput) recordLocationWalkthrough(job.locationProjectId, localOutput)
             const extractionError = localOutput && job.characterProjectId ? await extractAutomatedReferenceSet('character', job.characterProjectId, localOutput, job.duration, settings) : localOutput && job.locationProjectId ? await extractAutomatedReferenceSet('location', job.locationProjectId, localOutput, job.duration, settings) : null
@@ -991,11 +1019,7 @@ function App() {
       // not have a ComfyUI output descriptor. Recover that path before trying
       // the older descriptor-based lookup so Continue exactly works after a
       // restart and for jobs saved by the runner.
-      let mediaPath: string | null = null
-      try {
-        const media = new URL(job.outputUrl)
-        if (media.protocol === 'minimax-media:' && media.hostname === 'selected') mediaPath = media.searchParams.get('path')
-      } catch { /* outputUrl may be a plain ComfyUI URL */ }
+      const mediaPath = localPathFromMediaUrl(job.outputUrl)
       const source = job.localOutputPath ?? mediaPath ?? (outputFile ? await window.minimax.resolveOutput(settings.outputDirectory, outputFile) : null)
       if (!source) throw new Error('The completed video file could not be found in the output folder.')
       const extracted = await window.minimax.extractVideoFrame(source, 'last', settings.outputDirectory, settings.ffmpegPath)
@@ -1011,12 +1035,13 @@ function App() {
       setResolution(`${job.renderWidth ?? job.width}x${job.renderHeight ?? job.height}`)
       if (job.turbo) setTurbo(job.turbo)
       if (job.steps) setSteps(job.steps)
+      if (job.seed !== undefined) { setSeed(job.seed); setRef2vaSeed(job.seed); setSeedLocked(true) }
       if (job.noDialogue !== undefined) setNoDialogue(job.noDialogue)
       if (job.naturalMovement !== undefined) setNaturalMovement(job.naturalMovement)
       if (job.loraStrength !== undefined) setLoraStrength(job.loraStrength)
       setUpscaleMode('off')
       setActiveJobId(null)
-      setNotice({ tone: 'success', text: 'Continuation prepared. The exact final frame is locked as the next I2V opening frame; source canvas and sampling settings were retained.' })
+      setNotice({ tone: 'success', text: job.seed !== undefined ? `Continuation prepared. Final frame and seed ${job.seed} are locked for the next I2V render.` : 'Continuation prepared. The exact final frame is locked as the next I2V opening frame; source canvas and sampling settings were retained.' })
     } catch (error) {
       setNotice({ tone: 'error', text: `Could not prepare the continuation frame: ${error instanceof Error ? error.message : String(error)}` })
     }
@@ -1031,7 +1056,7 @@ function App() {
       return
     }
     await chooseMedia(kind, (file) => {
-      if (kind === 'image') { setSelectedReferenceCharacterIds([]); setSelectedReferenceLocationIds([]); setReferenceImages((current) => current.length < 9 ? [...current, file] : current) }
+      if (kind === 'image') setReferenceImages((current) => current.length < 9 ? [...current, { ...file, referenceRole: 'composition', referenceRetention: 'guide', crop: { x: .5, y: .5, zoom: 1, fit: 'crop', background: 'auto' } }] : current)
       if (kind === 'audio') setReferenceAudios((current) => current.length < 3 ? [...current, file] : current)
     })
   }
@@ -1058,7 +1083,12 @@ function App() {
       try { return { ...source, preview: await window.minimax.fileDataUrl(source.path) } }
       catch { return source }
     }))
-    setReferenceImages(images)
+    const previousPaths = new Set(previous.map((binding) => binding.file.path))
+    const nextPaths = new Set(next.map((binding) => binding.file.path))
+    setReferenceImages((current) => {
+      const standalone = current.filter((file) => !previousPaths.has(file.path) && !nextPaths.has(file.path))
+      return [...images, ...standalone].slice(0, 9)
+    })
     // Approved source assignments are a locked prompt layer. Keep them out of
     // the editable scene field, but remove any legacy generated text that may
     // have been inserted by an earlier version before the render-time composer
@@ -1104,13 +1134,13 @@ function App() {
   const loadReferenceCharacter = async (characterId: string) => {
     const previousBindings = workspaceBindingsFor(selectedReferenceCharacterIds, selectedReferenceLocationIds)
     const selectedIds = characterId ? (selectedReferenceCharacterIds.includes(characterId) ? selectedReferenceCharacterIds.filter((id) => id !== characterId) : [...selectedReferenceCharacterIds, characterId]) : []
-    setSelectedReferenceCharacterIds(selectedIds)
     setMode('reference')
     const selectedCharacters = selectedIds.map((id) => characterProjects.find((project) => project.id === id)).filter(Boolean) as CharacterProject[]
-    if (selectedCharacters.some((character) => characterReferences(character, settings?.characterDetailReferencesEnabled).length === 0)) {
+    if (selectedCharacters.some((character) => characterIdentityReferences(character).length === 0)) {
       setNotice({ tone: 'error', text: 'Every selected character needs at least one approved identity image.' })
       return
     }
+    setSelectedReferenceCharacterIds(selectedIds)
     const bindings = workspaceBindingsFor(selectedIds, selectedReferenceLocationIds)
     await applyWorkspaceBindings(previousBindings, bindings)
     const identityCount = bindings.filter((item) => item.purpose === 'character' || item.purpose === 'character-angle').length
@@ -1318,7 +1348,7 @@ function App() {
   const captureWorkspaceProject = (scope: WorkspaceProjectScope): Record<string, unknown> => {
     if (scope === 'create') return {
       mode, prompt, duration, resolution, turbo, steps, sampler, scheduler, experimentalSampling, refImageSize, noDialogue, naturalMovement, clothingPolicy, sigmaShiftMode, shiftVideo, shiftAudio, loraStrength, userLoras,
-      seed, seedLocked, advanced, liveEnabled, livePreviewMode, upscaleMode, textEncoderPreference, turbo8Profile, rtxModel, firstFrame: withoutPreview(firstFrame), lastFrame: withoutPreview(lastFrame),
+      seed, ref2vaSeed, seedLocked, advanced, liveEnabled, livePreviewMode, upscaleMode, textEncoderPreference, turbo8Profile, rtxModel, firstFrame: withoutPreview(firstFrame), lastFrame: withoutPreview(lastFrame),
       referenceImages: referenceImages.map((file) => withoutPreview(file)), referenceVideos: referenceVideos.map((file) => withoutPreview(file)), referenceAudios: referenceAudios.map((file) => withoutPreview(file)), selectedReferenceCharacterIds, selectedReferenceLocationIds,
     }
     const storageKey = scope === 'ltx25' ? 'ltx25.workspace' : scope === 'zimage' ? 'minimax.zimage-workspace' : 'acestep.workspace'
@@ -1339,7 +1369,7 @@ function App() {
   const loadWorkspaceProject = (project: WorkspaceProject) => {
     if (project.scope === 'create') {
       const saved = { ...workspaceDefaults, ...project.snapshot } as PersistedWorkspace
-      setMode(saved.mode); setPrompt(saved.prompt); setDuration(saved.duration); setResolution(saved.resolution); setTurbo(saved.turbo); setSteps(saved.steps); setSampler(saved.sampler); setScheduler(saved.scheduler); setExperimentalSampling(saved.experimentalSampling); setRefImageSize(saved.refImageSize); setNoDialogue(saved.noDialogue); setNaturalMovement(saved.naturalMovement); setClothingPolicy(saved.clothingPolicy); setSigmaShiftMode(saved.sigmaShiftMode); setShiftVideo(saved.shiftVideo); setShiftAudio(saved.shiftAudio); setLoraStrength(saved.loraStrength); setUserLoras(Array.isArray(saved.userLoras) ? saved.userLoras : workspaceDefaults.userLoras); setSeed(saved.seed); setSeedLocked(saved.seedLocked); setAdvanced(saved.advanced); setLiveEnabled(saved.liveEnabled); setLivePreviewMode(saved.livePreviewMode); setUpscaleMode(saved.upscaleMode); setTextEncoderPreference(saved.textEncoderPreference); setTurbo8Profile(saved.turbo8Profile); setRtxModel(saved.rtxModel); setFirstFrame(saved.firstFrame); setLastFrame(saved.lastFrame); setReferenceImages(saved.referenceImages); setReferenceVideos(saved.referenceVideos); setReferenceAudios(saved.referenceAudios); setSelectedReferenceCharacterIds(saved.selectedReferenceCharacterIds); setSelectedReferenceLocationIds(saved.selectedReferenceLocationIds); setActiveJobId(null); setView('create'); setCreateResetKey((value) => value + 1)
+      setMode(saved.mode); setPrompt(saved.prompt); setDuration(saved.duration); setResolution(saved.resolution); setTurbo(saved.turbo); setSteps(saved.steps); setSampler(saved.sampler); setScheduler(saved.scheduler); setExperimentalSampling(saved.experimentalSampling); setRefImageSize(saved.refImageSize); setNoDialogue(saved.noDialogue); setNaturalMovement(saved.naturalMovement); setClothingPolicy(saved.clothingPolicy); setSigmaShiftMode(saved.sigmaShiftMode); setShiftVideo(saved.shiftVideo); setShiftAudio(saved.shiftAudio); setLoraStrength(saved.loraStrength); setUserLoras(Array.isArray(saved.userLoras) ? saved.userLoras : workspaceDefaults.userLoras); setSeed(saved.seed); setRef2vaSeed(saved.ref2vaSeed ?? saved.seed); setSeedLocked(saved.seedLocked); setAdvanced(saved.advanced); setLiveEnabled(saved.liveEnabled); setLivePreviewMode(saved.livePreviewMode); setUpscaleMode(saved.upscaleMode); setTextEncoderPreference(saved.textEncoderPreference); setTurbo8Profile(saved.turbo8Profile); setRtxModel(saved.rtxModel); setFirstFrame(saved.firstFrame); setLastFrame(saved.lastFrame); setReferenceImages(saved.referenceImages); setReferenceVideos(saved.referenceVideos); setReferenceAudios(saved.referenceAudios); setSelectedReferenceCharacterIds(saved.selectedReferenceCharacterIds); setSelectedReferenceLocationIds(saved.selectedReferenceLocationIds); setActiveJobId(null); setView('create'); setCreateResetKey((value) => value + 1)
     } else {
       const storageKey = project.scope === 'ltx25' ? 'ltx25.workspace' : project.scope === 'zimage' ? 'minimax.zimage-workspace' : 'acestep.workspace'
       localStorage.setItem(storageKey, JSON.stringify(project.snapshot))
@@ -1624,13 +1654,38 @@ function App() {
       setNotice({ tone: 'error', text: 'Reference limits are 9 pictures, 3 videos, and 3 audio files. Remove extras before rendering.' })
       return
     }
+    const workspaceBindings = workspaceBindingsFor(selectedReferenceCharacterIds, selectedReferenceLocationIds)
+    const renderBindings = resolveRenderReferenceBindings(referenceImages, workspaceBindings, clothingPolicy)
+    const renderReferenceImages = renderBindings.map((binding) => binding.file)
+    const promptAudit = auditH3Prompt(prompt, { mode, duration, bindings: renderBindings, imageCount: renderReferenceImages.length, videoCount: referenceVideos.length, audioCount: referenceAudios.length, noDialogue })
+    if (promptAudit.errors.length) {
+      setNotice({ tone: 'error', text: `Prompt needs attention: ${promptAudit.errors[0]}` })
+      return
+    }
+    const requiredReferenceFiles = [
+      ...(mode === 'reference' ? [...renderReferenceImages, ...referenceVideos, ...referenceAudios] : []),
+      ...((mode === 'image' || mode === 'frames') && firstFrame ? [firstFrame] : []),
+      ...(mode === 'frames' && lastFrame ? [lastFrame] : []),
+    ]
+    if (requiredReferenceFiles.length) {
+      try {
+        const validation = await window.minimax.validateMediaFiles(requiredReferenceFiles)
+        const invalid = validation.filter((file) => !file.valid)
+        if (invalid.length) {
+          const labels = invalid.slice(0, 3).map((file) => file.path.split(/[\\/]/).at(-1) || 'reference').join(', ')
+          setNotice({ tone: 'error', text: `Cannot start this render: ${labels}${invalid.length > 3 ? ` and ${invalid.length - 3} more` : ''} ${invalid.length === 1 ? 'is' : 'are'} unavailable or unsupported. Re-select the affected reference file${invalid.length === 1 ? '' : 's'}.` })
+          return
+        }
+      } catch (error) {
+        setNotice({ tone: 'error', text: `Could not verify the selected reference files: ${error instanceof Error ? error.message : String(error)}` })
+        return
+      }
+    }
 
     const setTargetSubmitting = target === 'image' ? setStillSubmitting : setSubmitting
     setTargetSubmitting(true)
     setNotice({ tone: 'neutral', text: target === 'image' ? 'Preparing one Ref2VA reference still…' : 'Uploading inputs and preparing the ComfyUI graph…' })
-    const workspaceBindings = workspaceBindingsFor(selectedReferenceCharacterIds, selectedReferenceLocationIds)
-    const renderReferenceImages = resolveRenderReferenceImages(referenceImages, workspaceBindings, clothingPolicy)
-    const composedPrompt = composeH3Prompt({ prompt, mode, duration, bindings: workspaceBindings, clothingPolicy, noDialogue, naturalMovement, referenceVideoCount: referenceVideos.length, referenceAudioCount: referenceAudios.length })
+    const composedPrompt = composeH3Prompt({ prompt, mode, duration, bindings: renderBindings, clothingPolicy, noDialogue, naturalMovement, referenceVideoCount: referenceVideos.length, referenceAudioCount: referenceAudios.length })
     const effectivePrompt = target === 'image'
       ? `${composedPrompt}\n\nWhen people are visible, render naturally open, relaxed eyes with clear irises and pupils, anatomically correct eyelids, and a believable attentive gaze. Avoid closed eyes, squinting, crossed eyes, vacant stares, or unnaturally wide eyes.`
       : composedPrompt
@@ -1688,7 +1743,7 @@ function App() {
       const [first, last, images, videos, audios] = await Promise.all([
         firstFrame && (mode === 'image' || mode === 'frames') ? upload(firstFrame, true) : undefined,
         lastFrame && mode === 'frames' ? upload(lastFrame, true) : undefined,
-        Promise.all(mode === 'reference' ? renderReferenceImages.map((file) => upload(file)) : []),
+        Promise.all(mode === 'reference' ? renderReferenceImages.map((file) => upload(file, true)) : []),
         Promise.all(mode === 'reference' ? referenceVideos.map((file) => upload(file)) : []),
         Promise.all(mode === 'reference' ? referenceAudios.map((file) => upload(file)) : []),
       ])
@@ -1730,10 +1785,14 @@ function App() {
         setNotice({ tone: 'success', text: target === 'image' ? 'Reference still cancelled.' : 'Generation cancelled.' })
       } else {
         setJobs((current) => current.map((item) => item.id === localId ? { ...item, promptId: response.prompt_id, status: 'running', progress: 4, progressLabel: target === 'image' ? 'Generating one Ref2VA reference still' : 'Waiting for ComfyUI to start' } : item))
+        if (mode === 'reference') setRef2vaSeed(seed)
         setNotice({ tone: 'success', text: target === 'image' ? 'Reference still added to the local ComfyUI queue.' : 'Generation added to the local ComfyUI queue.' })
         if (target === 'video') setCharacterHandoff(null)
       }
-      if (mode !== 'reference' || !seedLocked) setSeed(randomH3Seed(seed))
+      // A locked seed is authoritative for every H3 route, including I2V.
+      // Previously non-reference submissions always randomized after queueing,
+      // which broke Ref2VA → I2V reproducibility.
+      if (!seedLocked) setSeed(randomH3Seed(seed))
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       const cancelled = cancellationRequests.current.has(localId)
@@ -1745,6 +1804,10 @@ function App() {
       setTargetSubmitting(false)
     }
   }
+
+  // Keep the auto-render bridge on the latest generate implementation without
+  // making its effect depend on a function recreated by every render.
+  generateRef.current = generate
 
   const sendStillToI2v = async (job: GenerationJob, provider: 'minimax' | 'ltx25') => {
     if (!job.localOutputPath) {
@@ -1771,8 +1834,9 @@ function App() {
       setSelectedReferenceLocationIds([])
       setMode('image')
       setResolution(`${job.width}x${job.height}`)
+      if (job.seed !== undefined) { setSeed(job.seed); setRef2vaSeed(job.seed); setSeedLocked(true) }
       setActiveJobId(null)
-      setNotice({ tone: 'success', text: 'Generated still loaded as the MiniMax I2V starting frame.' })
+      setNotice({ tone: 'success', text: job.seed !== undefined ? `Generated still loaded as the MiniMax I2V starting frame. Seed ${job.seed} locked for the next render.` : 'Generated still loaded as the MiniMax I2V starting frame.' })
     } catch (error) {
       setNotice({ tone: 'error', text: error instanceof Error ? error.message : String(error) })
     }
@@ -1784,8 +1848,8 @@ function App() {
   useEffect(() => {
     if (!pendingMovieAutoRender || view !== 'create' || submitting || !movieHandoff) return
     setPendingMovieAutoRender(false)
-    void generate()
-  }, [pendingMovieAutoRender, view, submitting, movieHandoff])
+    void generateRef.current?.()
+  }, [movieHandoff, pendingMovieAutoRender, submitting, view])
 
   const runH3Diagnostics = async () => {
     if (!settings || diagnosticRunning) return
@@ -1856,6 +1920,9 @@ function App() {
     setSettings(next)
     void window.minimax.saveSettings(next).catch((error) => setNotice({ tone: 'error', text: `The model changed for this session, but could not be saved: ${error instanceof Error ? error.message : String(error)}` }))
   }
+  const copilotReferenceBindings = mode === 'reference'
+    ? resolveRenderReferenceBindings(referenceImages, workspaceBindingsFor(selectedReferenceCharacterIds, selectedReferenceLocationIds), clothingPolicy)
+    : []
 
   return (
     <div className={`app-shell ${sidebarOpen ? '' : 'sidebar-collapsed'}`}>
@@ -1896,6 +1963,7 @@ function App() {
             <NavButton active={view === 'library'} icon={Library} label="Library" onClick={() => setView('library')} />
             <NavButton active={view === 'queue'} icon={ListVideo} label="Queue" count={pendingJobs.length} onClick={() => setView('queue')} />
             <NavButton active={view === 'editor'} icon={Scissors} label="Clip editor" onClick={() => setView('editor')} />
+            <NavButton active={view === 'clipmaster'} icon={Film} label="Clip Master Beta" onClick={() => setView('clipmaster')} />
             <NavButton active={view === 'movie'} icon={Clapperboard} label="Movie planner" onClick={() => setView('movie')} />
           </div>
         </nav>
@@ -1917,7 +1985,7 @@ function App() {
             onApplyIntent={(intent) => {
               const values = intent.values
               setResolution(values.resolution); setDuration(values.duration); setTurbo(values.turbo); setTurbo8Profile(values.turbo8Profile); setTextEncoderPreference(values.textEncoderPreference); setSteps(values.steps); setSampler(values.sampler); setScheduler(values.scheduler); setExperimentalSampling(values.experimentalSampling); setRefImageSize(values.refImageSize); setLiveEnabled(values.livePreview); setSigmaShiftMode(values.sigmaShiftMode); setShiftVideo(values.shiftVideo); setShiftAudio(values.shiftAudio); setLoraStrength(values.loraStrength); setUpscaleMode(values.upscaleMode)
-              setUserLoras(values.userLoras.map((item) => ({ ...item }))); setRtxModel(values.rtxModel); setLivePreviewMode(values.livePreviewMode); setNoDialogue(values.noDialogue); setNaturalMovement(values.naturalMovement); setClothingPolicy(values.clothingPolicy); setSeed(values.seed); setSeedLocked(values.seedLocked)
+              setUserLoras(values.userLoras.map((item) => ({ ...item }))); setRtxModel(values.rtxModel); setLivePreviewMode(values.livePreviewMode); setNoDialogue(values.noDialogue); setNaturalMovement(values.naturalMovement); setClothingPolicy(values.clothingPolicy); setSeed(values.seed); if (mode === 'reference') setRef2vaSeed(values.seed); setSeedLocked(values.seedLocked)
               setNotice({ tone: 'success', text: `Intent “${intent.name}” applied to this Ref2VA workspace.` })
             }}
             onSaveIntent={(name, values) => {
@@ -1967,7 +2035,7 @@ function App() {
             steps={steps}
             setSteps={setSteps}
             seed={seed}
-            setSeed={setSeed}
+            setSeed={(value) => { setSeed(value); if (mode === 'reference') setRef2vaSeed(value) }}
             seedLocked={seedLocked}
             setSeedLocked={setSeedLocked}
             advanced={advanced}
@@ -2078,7 +2146,7 @@ function App() {
           const clarityDirection = 'Maintain crisp, sharp frames with a fast shutter and slow stabilized camera movement. No motion blur, temporal smearing, ghosting, rolling-shutter distortion, speed ramps, whip pans, or rapid camera movement.'
           return generateLtx({ mode: 'image', prompt: `${walkthroughDirection} Location description: ${locationProfile} Camera language: ${cameraLanguage} Image clarity: ${clarityDirection} No cuts, no teleporting, no layout changes, no duplicated objects, no people as focal subjects, no dialogue, no text, no logos.`, width: 1344, height: 768, duration: Math.max(5, Math.min(20, options?.duration ?? 10)), preset: 'quality', seed: Math.floor(Math.random() * 1_000_000_000), filenamePrefix: 'MiniMax_location_walkthrough' }, firstFrame, { locationProjectId: project.id })
         }} />}
-        {view === 'movie' && <MoviePlanner settings={settings} jobs={jobs} ollamaAvailable={ollamaModels.length > 0} ollamaModel={llmConnection.model} onNotice={(tone, text) => setNotice({ tone, text })} onOpenShot={async (shot: MovieShot, aspectRatio: MovieProject['aspectRatio'], resolved: ResolvedMovieShot, context: { projectId: string; sceneId: string; continuationSource?: string; autoStart?: boolean; renderSettings?: MovieProject['productionSettings'] }) => {
+        {view === 'movie' && <MoviePlanner settings={settings} jobs={jobs} workingSeed={ref2vaSeed} connected={status.connected} ollamaAvailable={ollamaModels.length > 0} ollamaModel={llmConnection.model} onNotice={(tone, text) => setNotice({ tone, text })} onOpenShot={async (shot: MovieShot, aspectRatio: MovieProject['aspectRatio'], resolved: ResolvedMovieShot, context: { projectId: string; sceneId: string; continuationSource?: string; continuityFrame?: MediaFile; autoStart?: boolean; renderSettings?: MovieProject['productionSettings'] }) => {
           setCharacterHandoff(null)
           setSelectedReferenceCharacterIds([])
           setSelectedReferenceLocationIds([])
@@ -2086,9 +2154,22 @@ function App() {
           setDuration(Math.max(2, Math.min(15, shot.duration)))
           setMode(resolved.effectiveMode)
           setResolution(context.renderSettings?.resolution ?? (aspectRatio === '9:16' ? '768x1344' : aspectRatio === '1:1' ? '768x768' : '1344x768'))
-          if (context.renderSettings) { setTurbo(context.renderSettings.turbo); setSteps(context.renderSettings.steps) }
-          let inheritedFrame: MediaFile | null = null
-          if (context.continuationSource) {
+          if (context.renderSettings) {
+            setTurbo(context.renderSettings.turbo)
+            setSteps(context.renderSettings.steps)
+            if (context.renderSettings.seed !== undefined) {
+              setSeed(context.renderSettings.seed)
+              setSeedLocked(true)
+            }
+            if (context.renderSettings.noDialogue !== undefined) setNoDialogue(context.renderSettings.noDialogue)
+            if (context.renderSettings.naturalMovement !== undefined) setNaturalMovement(context.renderSettings.naturalMovement)
+          }
+          let inheritedFrame: MediaFile | null = context.continuityFrame ? { ...context.continuityFrame } : null
+          if (inheritedFrame && !inheritedFrame.preview) {
+            try { inheritedFrame.preview = await window.minimax.mediaUrl(inheritedFrame.path) }
+            catch { inheritedFrame = null }
+          }
+          if (!inheritedFrame && context.continuationSource) {
             try {
               const extracted = await window.minimax.extractVideoFrame(context.continuationSource, 'last', settings.outputDirectory, settings.ffmpegPath)
               inheritedFrame = { ...extracted, kind: 'image', preview: await window.minimax.mediaUrl(extracted.path) }
@@ -2102,25 +2183,33 @@ function App() {
           setFirstFrame(resolved.effectiveMode === 'image' ? inheritedFrame : null); setLastFrame(null); setReferenceImages(resolved.effectiveMode === 'reference' ? resolvedImages : []); setReferenceVideos(resolved.effectiveMode === 'reference' ? shot.referenceVideos ?? [] : []); setReferenceAudios(resolved.effectiveMode === 'reference' ? shot.referenceAudios ?? [] : [])
           setActiveJobId(null); setView('create')
           setPendingMovieAutoRender(Boolean(context.autoStart))
-          const inputNote = resolved.effectiveMode === 'reference' ? ` Loaded ${resolvedImages.length} semantically resolved reference image${resolvedImages.length === 1 ? '' : 's'}.` : inheritedFrame ? ' The previous scene’s last frame was loaded automatically for continuous I2V.' : resolved.effectiveMode === 'image' ? ' Add the approved first frame before rendering.' : resolved.effectiveMode === 'frames' ? ' Add the approved first and last frames before rendering.' : ''
+          const inputNote = resolved.effectiveMode === 'reference' ? ` Loaded ${resolvedImages.length} semantically resolved reference image${resolvedImages.length === 1 ? '' : 's'}.` : inheritedFrame ? ' The approved continuity frame was loaded automatically as the exact I2V first frame.' : resolved.effectiveMode === 'image' ? ' Add the approved first frame before rendering.' : resolved.effectiveMode === 'frames' ? ' Add the approved first and last frames before rendering.' : ''
           setNotice({ tone: 'success', text: `${shot.title} loaded into Create.${inputNote}` })
         }} />}
         {view === 'queue' && <JobsView title="Queue" note="Running and recent local generations" jobs={jobs} empty="No generations have been queued." cancellingIds={cancellingIds} onCancel={cancelJob} />}
         {view === 'library' && <LibraryView jobs={jobs.filter((job) => job.status === 'completed')} settings={settings} onEdit={() => setView('editor')} onUseLtx={loadStartFrameInLtx} onNotice={(tone, text) => setNotice({ tone, text })} />}
-        {view === 'editor' && <ClipEditor settings={settings} jobs={jobs} onNotice={(tone, text) => setNotice({ tone, text })} onUseFrame={(file, target, clip) => {
+        {view === 'editor' && <ClipEditor settings={settings} jobs={jobs} onOpenClipMaster={setClipMasterClip} onNotice={(tone, text) => setNotice({ tone, text })} onUseFrame={(file, target, clip) => {
           if (target === 'reference') { setSelectedReferenceCharacterIds([]); setSelectedReferenceLocationIds([]); setReferenceImages((items) => [...items, file].slice(0, 9)); setMode('reference') }
           else if (target === 'last') { setLastFrame(file); setMode('frames') }
           else { setFirstFrame(file); setMode(target === 'first' ? 'frames' : 'image') }
           setActiveJobId(null); setView('create')
           setNotice({ tone: 'success', text: target === 'i2v' ? `Frame loaded from ${clip.name} as the I2V first frame. The new render will remain a separate video until you add and export it in Clip Editor.` : 'Extracted frame loaded into Create.' })
         }} />}
+        {view === 'clipmaster' && <ClipMasterLaunchpad jobs={jobs} onOpenClip={setClipMasterClip} onChooseLocal={() => void (async () => {
+          try {
+            const picked = await window.minimax.chooseMedia('video')
+            if (!picked) return
+            setClipMasterClip({ id: createId(), name: picked.name, source: await window.minimax.mediaUrl(picked.path), createdAt: Date.now() })
+          } catch (error) { setNotice({ tone: 'error', text: `Could not open this video in Clip Master Beta: ${error instanceof Error ? error.message : String(error)}` }) }
+        })()} />}
         {view === 'settings' && <SettingsView settings={settings} setSettings={setSettings} info={info} models={models} h3Report={h3Report} scanning={scanning} status={status} checking={checking} diagnosticRunning={diagnosticRunning} ollamaModels={ollamaModels} legacyMigration={legacyMigration} legacyMigrationRunning={legacyMigrationRunning} onRefreshOllama={() => void refreshOllama(settings)} onScan={() => void scanModels(settings)} onCheck={() => void checkConnection(settings.comfyUrl)} onSave={() => void saveAppSettings()} onApplyDefaults={applyGenerationDefaults} onRunDiagnostics={() => void runH3Diagnostics()} onRunLegacyMigration={() => void runLegacyMigration()} />}
       </main>
       <footer className="status-bar" aria-label="Application status">
-        <span className="status-bar-context"><Film size={14} /><strong>{view === 'create' ? `Create · ${mode === 'reference' ? 'Ref2VA' : 'MiniMax H3'}` : workspaceProjectLabel(workspaceProjectScope(view) ?? 'create')}</strong></span>
+        <span className="status-bar-context"><Film size={14} /><strong>{view === 'create' ? `Create · ${mode === 'reference' ? 'Ref2VA' : 'MiniMax H3'}` : view === 'clipmaster' ? 'Clip Master Beta' : workspaceProjectLabel(workspaceProjectScope(view) ?? 'create')}</strong></span>
         <span className="status-bar-divider" aria-hidden="true" />
         {activeRenderRuntime !== undefined && <span className={`status-bar-runtime ${activeRenderJob?.status === 'running' || activeRenderJob?.status === 'queued' ? 'active' : ''}`} role="status" title="Total time since this render was queued"><Clock3 size={13} />{activeRenderJob?.status === 'queued' ? 'Queued' : activeRenderJob?.status === 'running' ? 'Rendering' : 'Render'} · {formatRuntime(activeRenderRuntime)}</span>}
         {activeSamplerProgress && <span className="status-bar-sampler" role="status" title={`ComfyUI render progress: ${activeSamplerProgress.currentStep} of ${activeSamplerProgress.totalSteps} sampler steps (${activeSamplerProgress.progress}%). ${activeSamplerProgress.remainingMs !== undefined ? `Estimated ${formatRuntime(activeSamplerProgress.remainingMs)} remaining.` : 'Remaining-time estimate will appear after another sampler step is measured.'}`}><Gauge size={13} /><strong>{activeSamplerProgress.progress}%</strong><span>{activeSamplerProgress.currentStep}/{activeSamplerProgress.totalSteps}</span>{activeSamplerProgress.rate && <span>{formatStepDuration(activeSamplerProgress.rate)}</span>}{activeSamplerProgress.remainingMs !== undefined && <span className="sampler-estimate">ETA ~{formatRuntime(activeSamplerProgress.remainingMs)}</span>}</span>}
+        <button type="button" className={`working-seed ${view === 'create' && mode === 'reference' || seed === ref2vaSeed ? 'matching' : 'mismatch'}`} onClick={() => { setSeed(ref2vaSeed); setSeedLocked(true); setNotice({ tone: 'success', text: `Working seed synchronized to Ref2VA seed ${ref2vaSeed}.` }) }} title={view === 'create' && mode === 'reference' ? `Ref2VA working seed ${ref2vaSeed} is authoritative.` : seed === ref2vaSeed ? `Working seed ${seed} matches the Ref2VA seed.` : `Current workspace seed ${seed} differs from Ref2VA seed ${ref2vaSeed}. Click to synchronize.`} aria-label={view === 'create' && mode === 'reference' ? `Ref2VA working seed ${ref2vaSeed}` : seed === ref2vaSeed ? `Working seed ${seed}, matches Ref2VA` : `Working seed ${seed}, click to use Ref2VA seed ${ref2vaSeed}`}><Dices size={13} /><span>Working seed</span><strong>{view === 'create' && mode === 'reference' ? ref2vaSeed : seed}</strong>{view !== 'create' || mode !== 'reference' ? seed !== ref2vaSeed && <small>· Ref2VA {ref2vaSeed}</small> : <small>· source</small>}</button>
         <span className="status-bar-spacer" />
         <GpuMeter value={gpu} />
         <button className={`connection-chip ${status.connected ? 'online' : ''}`} onClick={() => void checkConnection(settings.comfyUrl)} title="Check ComfyUI connection">
@@ -2128,7 +2217,7 @@ function App() {
           {status.connected ? `Local engine · ${status.latencyMs} ms` : 'Engine offline'}
         </button>
       </footer>
-      <AiChatHead available={ollamaModels.length > 0} provider={llmConnection.provider} ollamaUrl={llmConnection.url} ollamaModel={llmConnection.model} models={ollamaModels} onModelChange={changeCopilotModel} context={view === 'characters' ? characterCopilotContext : view === 'create' ? { label: `Create · ${mode} to video`, prompt, duration, noDialogue, generationMode: mode, referenceMap: mode === 'reference' ? [...referenceImages.map((file, index) => `<Picture ${index + 1}> = ${workspaceBindingsFor(selectedReferenceCharacterIds, selectedReferenceLocationIds)[index]?.label ?? file.name}`), ...referenceVideos.map((file, index) => `<Video ${index + 1}> = ${file.name}`), ...referenceAudios.map((file, index) => `<Audio ${index + 1}> = ${file.name}`)] : [], imagePaths: mode === 'reference' ? referenceImages.map((file) => file.path) : [firstFrame?.path, lastFrame?.path].filter(Boolean) as string[] } : { label: view === 'zimage' ? 'Create Image' : view.replace(/\b\w/g, (letter) => letter.toUpperCase()) }} onUseImage={(imagePrompt) => {
+      <AiChatHead available={ollamaModels.length > 0} provider={llmConnection.provider} ollamaUrl={llmConnection.url} ollamaModel={llmConnection.model} models={ollamaModels} onModelChange={changeCopilotModel} context={view === 'characters' ? characterCopilotContext : view === 'create' ? { label: `Create · ${mode} to video`, prompt, duration, noDialogue, generationMode: mode, referenceMap: mode === 'reference' ? [...copilotReferenceBindings.map((binding, index) => `<Picture ${index + 1}> = ${binding.label} · ${binding.file.referenceRetention === 'preserve' ? 'must preserve' : 'guide only'}`), ...referenceVideos.map((file, index) => `<Video ${index + 1}> = ${file.name}`), ...referenceAudios.map((file, index) => `<Audio ${index + 1}> = ${file.name}`)] : [], imagePaths: mode === 'reference' ? copilotReferenceBindings.map((binding) => binding.file.path) : [firstFrame?.path, lastFrame?.path].filter(Boolean) as string[] } : { label: view === 'zimage' ? 'Create Image' : view.replace(/\b\w/g, (letter) => letter.toUpperCase()) }} onUseImage={(imagePrompt) => {
         setView('zimage')
         window.dispatchEvent(new CustomEvent('minimax:load-image-prompt', { detail: imagePrompt }))
         setNotice({ tone: 'success', text: 'Image prompt loaded into Create Image.' })
@@ -2138,6 +2227,7 @@ function App() {
       }} />
       {lanOpen && <LanCompanionDialog status={lanStatus} qr={lanQr} onRotate={async () => setLanStatus(await window.minimax.rotateLanToken())} onClose={() => setLanOpen(false)} />}
       {videoClipDraft && <VideoReferenceClipper source={videoClipDraft.source} onClose={() => setVideoClipDraft(null)} onCreate={createVideoReferenceClip} />}
+      {clipMasterClip && settings && <ClipMasterBeta clip={clipMasterClip} settings={settings} onClose={() => setClipMasterClip(null)} onNotice={(tone, text) => setNotice({ tone, text })} />}
     </div>
   )
 }
@@ -2276,8 +2366,10 @@ function CreateView(props: CreateViewProps) {
   const detailReferenceDirection = buildCharacterDetailInstructions(selectedCharacters, characterDetailReferencesEnabled)
   const selectedBindings = allocateWorkspaceReferences(selectedCharacters.map((character) => ({ id: character.id, name: character.name, identity: characterReferences(character), detailReferences: characterDetailReferencesEnabled ? character.detailReferences : [], hairStyleIds: character.hairStyleIds, wardrobeIds: character.wardrobeIds, accessoryIds: character.accessoryIds })), wardrobes, selectedLocations.map((location) => ({ id: location.id, name: location.name, images: locationReferences(location), environmentMode: location.environmentMode, locationContext: location.locationContext, accuracyDetails: location.accuracyDetails })))
   const activeSelectedBindings = clothingPolicy === 'wardrobe' ? selectedBindings : selectedBindings.filter((binding) => binding.purpose !== 'wardrobe')
-  const builderReferenceImages = resolveRenderReferenceImages(referenceImages, selectedBindings, clothingPolicy)
-  const composedPrompt = composeH3Prompt({ prompt, mode, duration, bindings: selectedBindings, clothingPolicy, noDialogue, naturalMovement, referenceVideoCount: referenceVideos.length, referenceAudioCount: referenceAudios.length })
+  const renderBindings = resolveRenderReferenceBindings(referenceImages, selectedBindings, clothingPolicy)
+  const builderReferenceImages = renderBindings.map((binding) => binding.file)
+  const promptAudit = auditH3Prompt(prompt, { mode, duration, bindings: renderBindings, imageCount: builderReferenceImages.length, videoCount: referenceVideos.length, audioCount: referenceAudios.length, noDialogue })
+  const composedPrompt = composeH3Prompt({ prompt, mode, duration, bindings: renderBindings, clothingPolicy, noDialogue, naturalMovement, referenceVideoCount: referenceVideos.length, referenceAudioCount: referenceAudios.length })
   const sourceMediaCount = referenceImages.length + referenceVideos.length + referenceAudios.length
   const closeSourceMedia = useCallback(() => {
     setSourceMediaOpen(false)
@@ -2389,6 +2481,7 @@ function CreateView(props: CreateViewProps) {
             </>}
             <div className="field-label"><label htmlFor="prompt">{mode === 'reference' ? 'Scene prompt' : 'Prompt'}</label><span>{prompt.length.toLocaleString()} characters</span></div>
             <SmartPromptEditor ref={promptRef} id="prompt" value={prompt} onChange={setPrompt} options={[...smartCharacterOptions, ...smartWardrobeOptions, ...smartLocationOptions]} placeholder={mode === 'reference' ? 'Describe the scene and references. Type // for production presets…' : 'Describe the shot, subject, movement, camera, lighting, and audio…'} />
+            {(promptAudit.errors.length || promptAudit.warnings.length || promptAudit.suggestions.length) && <div className={`prompt-health ${promptAudit.errors.length ? 'error' : promptAudit.warnings.length ? 'warning' : ''}`} role={promptAudit.errors.length ? 'alert' : 'status'}><AlertCircle size={14} /><div><strong>{promptAudit.errors.length ? 'Render blocker' : promptAudit.warnings.length ? 'Prompt check' : 'Prompt guidance'}</strong><span>{[...promptAudit.errors, ...promptAudit.warnings, ...promptAudit.suggestions].slice(0, 2).join(' ')}</span></div></div>}
             <div className="prompt-policy-toggles" aria-label="Prompt safeguards">
               <label className="no-dialogue-toggle" title={`Adds a render instruction that blocks spoken words, narration, singing, lip-sync, captions, and text overlays${mode === 'reference' ? ' in this Reference render' : ''}.`}><input type="checkbox" checked={noDialogue} onChange={(event) => setNoDialogue(event.target.checked)} /><span><strong>{mode === 'reference' ? 'No dialogue · Reference mode' : 'No dialogue'}</strong><small>{noDialogue ? 'Ambient sound only' : 'Dialogue and lip-sync allowed'}</small></span></label>
               <label className="no-dialogue-toggle natural-movement-toggle" title="Adds restrained breathing, blinking, eye movement, and posture adjustment without changing the requested action, pose, camera, identity, wardrobe, or scene."><input type="checkbox" checked={naturalMovement} onChange={(event) => setNaturalMovement(event.target.checked)} /><span><strong>Natural movement</strong><small>{naturalMovement ? 'Subtle subject motion' : 'No added motion direction'}</small></span></label>
@@ -2425,7 +2518,7 @@ function CreateView(props: CreateViewProps) {
 
           <section className="create-section advanced-workspace-section" aria-labelledby="advanced-controls-title">
             <button className="advanced-toggle" onClick={() => setAdvanced(!advanced)} aria-expanded={advanced} aria-controls="advanced-controls-panel"><SlidersHorizontal size={16} /><span><strong id="advanced-controls-title">Advanced controls</strong><small>Encoder, fixed-seed testing, Turbo overrides, and custom sampling.</small></span><ChevronDown size={15} className={advanced ? 'rotated' : ''} /></button>
-            {advanced && <div id="advanced-controls-panel" className="advanced-grid"><SelectField label="Text encoder" value={textEncoderPreference} onChange={(value) => setTextEncoderPreference(value as 'fast' | 'quality')} options={[["fast", 'Fast · NVFP4-AWQ · 15.7 GB'], ["quality", 'Slower · better encoding · INT8 ConvRot · 27.1 GB']]} /><p className="field-help">The slower quality option requires <strong>qwen3vl_32b_minimax_h3_int8_convrot.safetensors</strong> in Text encoders. It is never selected unless you choose it.</p><NumberField label="Full-quality steps" value={steps} min={16} max={30} onChange={setSteps} disabled={turbo !== 'off'} /><NumberField label="Seed" value={seed} min={0} max={999999999999} onChange={setSeed} disabled={mode === 'reference' && seedLocked} /><div className="turbo-lora-weight"><NumberField label="Official Turbo LoRA weight" value={loraStrength} min={0} max={2} step={0.05} onChange={setLoraStrength} disabled={turbo === 'off'} /><small>Controls the automatic official Turbo adapter only. It does not change the Additional ComfyUI LoRAs above.</small></div><label className="sampling-opt-in"><input type="checkbox" checked={experimentalSampling} onChange={(event) => setExperimentalSampling(event.target.checked)} />Use custom sampler and scheduler</label><SelectField label="Experimental Turbo override" value={turbo} onChange={(value) => setTurbo(value as 'off' | '4' | '8')} options={[["off", 'Off · native quality'], ["8", 'Official 8-step'], ["4", '4-step · preview testing']]} /><SelectField label="Sampler" value={experimentalSampling ? sampler : turbo === '8' && turbo8Profile === 'stable' ? 'euler' : 'res_multistep'} onChange={setSampler} disabled={!experimentalSampling} options={[...new Set([sampler, 'euler', 'res_multistep', ...choices(info, 'KSamplerSelect', 'sampler_name')])].map((value) => [value, value])} /><SelectField label="Scheduler" value={experimentalSampling ? scheduler : turbo === '8' && turbo8Profile === 'motion' ? 'beta' : 'simple'} onChange={setScheduler} disabled={!experimentalSampling} options={[...new Set([scheduler, 'simple', 'beta', ...choices(info, 'BasicScheduler', 'scheduler')])].map((value) => [value, value])} /><SelectField label="Sigma shifts" value={sigmaShiftMode} onChange={(value) => setSigmaShiftMode(value as 'model' | 'custom')} options={[["model", 'Model defaults · video 12 / audio 3'], ["custom", 'Custom sigma-shift node']]} /><NumberField label="Video sigma shift" value={shiftVideo} min={0.01} max={100} step={0.01} onChange={setShiftVideo} disabled={sigmaShiftMode !== 'custom'} /><NumberField label="Audio sigma shift" value={shiftAudio} min={0.01} max={100} step={0.01} onChange={setShiftAudio} disabled={sigmaShiftMode !== 'custom'} /><p className="field-help advanced-sampling-note">Choose Custom sigma-shift node to tune the video and audio shifts for any Turbo profile. Turbo 8 profiles execute as shown: Stable uses Euler + Simple for faces and dialogue; Balanced uses res_multistep + Simple; Motion uses res_multistep + Beta. Full quality retains <strong>res_multistep + simple</strong>, CFG 1, denoise 1, and native shifts. Other sampler combinations remain experimental and should be compared at a fixed seed.</p></div>}
+            {advanced && <div id="advanced-controls-panel" className="advanced-grid"><SelectField label="Text encoder" value={textEncoderPreference} onChange={(value) => setTextEncoderPreference(value as 'fast' | 'quality')} options={[["fast", 'Fast · NVFP4-AWQ · 15.7 GB'], ["quality", 'Slower · better encoding · INT8 ConvRot · 27.1 GB']]} /><p className="field-help">The slower quality option requires <strong>qwen3vl_32b_minimax_h3_int8_convrot.safetensors</strong> in Text encoders. It is never selected unless you choose it.</p><NumberField label="Full-quality steps" value={steps} min={16} max={30} onChange={setSteps} disabled={turbo !== 'off'} /><NumberField label="Seed" value={seed} min={0} max={999999999999} onChange={setSeed} disabled={seedLocked} /><div className="turbo-lora-weight"><NumberField label="Official Turbo LoRA weight" value={loraStrength} min={0} max={2} step={0.05} onChange={setLoraStrength} disabled={turbo === 'off'} /><small>Controls the automatic official Turbo adapter only. It does not change the Additional ComfyUI LoRAs above.</small></div><label className="sampling-opt-in"><input type="checkbox" checked={experimentalSampling} onChange={(event) => setExperimentalSampling(event.target.checked)} />Use custom sampler and scheduler</label><SelectField label="Experimental Turbo override" value={turbo} onChange={(value) => setTurbo(value as 'off' | '4' | '8')} options={[["off", 'Off · native quality'], ["8", 'Official 8-step'], ["4", '4-step · preview testing']]} /><SelectField label="Sampler" value={experimentalSampling ? sampler : turbo === '8' && turbo8Profile === 'stable' ? 'euler' : 'res_multistep'} onChange={setSampler} disabled={!experimentalSampling} options={[...new Set([sampler, 'euler', 'res_multistep', ...choices(info, 'KSamplerSelect', 'sampler_name')])].map((value) => [value, value])} /><SelectField label="Scheduler" value={experimentalSampling ? scheduler : turbo === '8' && turbo8Profile === 'motion' ? 'beta' : 'simple'} onChange={setScheduler} disabled={!experimentalSampling} options={[...new Set([scheduler, 'simple', 'beta', ...choices(info, 'BasicScheduler', 'scheduler')])].map((value) => [value, value])} /><SelectField label="Sigma shifts" value={sigmaShiftMode} onChange={(value) => setSigmaShiftMode(value as 'model' | 'custom')} options={[["model", 'Model defaults · video 12 / audio 3'], ["custom", 'Custom sigma-shift node']]} /><NumberField label="Video sigma shift" value={shiftVideo} min={0.01} max={100} step={0.01} onChange={setShiftVideo} disabled={sigmaShiftMode !== 'custom'} /><NumberField label="Audio sigma shift" value={shiftAudio} min={0.01} max={100} step={0.01} onChange={setShiftAudio} disabled={sigmaShiftMode !== 'custom'} /><p className="field-help advanced-sampling-note">Choose Custom sigma-shift node to tune the video and audio shifts for any Turbo profile. Turbo 8 profiles execute as shown: Stable uses Euler + Simple for faces and dialogue; Balanced uses res_multistep + Simple; Motion uses res_multistep + Beta. Full quality retains <strong>res_multistep + simple</strong>, CFG 1, denoise 1, and native shifts. Other sampler combinations remain experimental and should be compared at a fixed seed.</p></div>}
           </section>
 
           {(mode === 'image' || mode === 'frames') && <section id="workspace-sources" className="create-section create-input-section">
@@ -2452,7 +2545,8 @@ function CreateView(props: CreateViewProps) {
                 <div className="source-media-modal-body">
                   <section className="source-media-modal-section"><div className="source-media-section-title"><span>01</span><div><strong>Libraries</strong><small>Select reusable people and environments. Their approved pictures share the 9-picture budget.</small></div></div><div className="reference-groups source-media-library-groups"><CharacterReferencePicker characters={characters} wardrobes={wardrobes} values={selectedCharacterIds} onChange={loadCharacter} /><LocationReferencePicker locations={locations} values={selectedLocationIds} onChange={loadLocation} /></div>{selectedBindings.length > 0 && <details className="source-media-auto-prompt"><summary><Sparkles size={14} /><span><strong>Automatic reference direction</strong><small>{selectedBindings.length} numbered picture assignment{selectedBindings.length === 1 ? '' : 's'} sent automatically at render time</small></span><ChevronDown size={14} /></summary><ol>{composeReferenceInstructions(selectedBindings).map((line) => <li key={line}>{line}</li>)}</ol></details>}</section>
                   <section className="source-media-modal-section"><div className="source-media-section-title"><span>02</span><div><strong>Clothing behavior</strong><small>Decide whether assigned wardrobe or identity-photo clothing is authoritative.</small></div></div><div className="reference-groups source-media-policy-groups"><fieldset className="reference-fidelity clothing-policy"><legend><Shirt size={15} /><span><strong>Clothing intent</strong><small>Controls whether identity-photo clothing or assigned wardrobe is authoritative.</small></span></legend><div><label className={clothingPolicy === 'wardrobe' ? 'selected' : ''}><input type="radio" name="clothing-policy" checked={clothingPolicy === 'wardrobe'} onChange={() => setClothingPolicy('wardrobe')} /><span><strong>Assigned wardrobe</strong><small>Wardrobe Studio images exclusively control clothing. Identity-photo clothes are discarded.</small></span></label><label className={clothingPolicy === 'underwear' ? 'selected' : ''}><input type="radio" name="clothing-policy" checked={clothingPolicy === 'underwear'} onChange={() => setClothingPolicy('underwear')} /><span><strong>Underwear</strong><small>Use each adult character's own identity reference without assigned outerwear.</small></span></label><label className={clothingPolicy === 'unrestricted' ? 'selected' : ''}><input type="radio" name="clothing-policy" checked={clothingPolicy === 'unrestricted'} onChange={() => setClothingPolicy('unrestricted')} /><span><strong>Unrestricted</strong><small>Follow explicit adult fictional clothing or nudity direction in the scene prompt.</small></span></label></div></fieldset></div></section>
-                  <section className="source-media-modal-section"><div className="source-media-section-title"><span>03</span><div><strong>Files and crops</strong><small>Add standalone pictures, motion references, and audio cues.</small></div></div><div className="reference-groups source-media-file-groups"><ReferenceRow icon={ImageIcon} label="Pictures" limit="Up to 9" kind="image" files={referenceImages} onAdd={() => void chooseReference('image')} onRemove={(index) => removeReference('image', index)} />{referenceImages.length > 0 && <div className="reference-crops">{referenceImages.map((file, i) => <details key={`${file.path}-${i}`}><summary>Picture {i + 1} · crop to output</summary><ImageCrop label={`Picture ${i + 1}`} file={file} resolution={resolution} onChange={(next) => updateReference(i, next)} /></details>)}</div>}<ReferenceRow icon={Film} label="Videos" limit="Up to 3 · trim longer sources to 2–15 seconds" kind="video" files={referenceVideos} onAdd={() => void chooseReference('video')} onEdit={editVideoReference} onRemove={(index) => removeReference('video', index)} /><ReferenceRow icon={Volume2} label="Audio" limit="Up to 3" kind="audio" files={referenceAudios} onAdd={() => void chooseReference('audio')} onRemove={(index) => removeReference('audio', index)} /></div></section>
+                  <section className="source-media-modal-section"><div className="source-media-section-title"><span>03</span><div><strong>Files and preparation</strong><small>Add standalone pictures, assign their role and retention, and choose the exact output-canvas treatment.</small></div></div><div className="reference-groups source-media-file-groups"><ReferenceRow icon={ImageIcon} label="Pictures" limit="Up to 9 total" kind="image" files={referenceImages} onAdd={() => void chooseReference('image')} onRemove={(index) => removeReference('image', index)} />{referenceImages.length > 0 && <div className="reference-crops">{referenceImages.map((file, i) => <details key={`${file.path}-${i}`}><summary>Picture {i + 1} · role and output preparation</summary><ImageCrop handoff label={`Picture ${i + 1}`} file={file} resolution={resolution} onChange={(next) => updateReference(i, next)} /></details>)}</div>}<ReferenceRow icon={Film} label="Videos" limit="Up to 3 · trim longer sources to 2–15 seconds" kind="video" files={referenceVideos} onAdd={() => void chooseReference('video')} onEdit={editVideoReference} onRemove={(index) => removeReference('video', index)} /><ReferenceRow icon={Volume2} label="Audio" limit="Up to 3" kind="audio" files={referenceAudios} onAdd={() => void chooseReference('audio')} onRemove={(index) => removeReference('audio', index)} /></div></section>
+                  <section className="source-media-modal-section"><div className="source-media-section-title"><span>04</span><div><strong>Final handoff inspection</strong><small>Verify the exact prepared canvas, numbered slot, role, retention, and source quality before queueing.</small></div></div><ReferenceHandoffInspector files={builderReferenceImages} labels={renderBindings.map((binding) => binding.label)} resolution={resolution} /></section>
                 </div>
                 <footer><span>{sourceMediaCount ? `${sourceMediaCount} file${sourceMediaCount === 1 ? '' : 's'} ready for this render` : 'No standalone files added yet'}</span><button type="button" className="primary-button" onClick={closeSourceMedia}><Check size={15} />Done</button></footer>
               </section>
@@ -2493,16 +2587,16 @@ function CreateView(props: CreateViewProps) {
             <RenderSize value={resolution} onChange={setResolution} />
             {mode === 'reference' && <details className="output-reference-fidelity"><summary><Gauge size={16} /><span><small>REFERENCE FIDELITY</small><strong>{refImageSize === 'max' ? 'Maximum identity' : 'Balanced'}</strong><em>{refImageSize === 'max' ? 'Keep more original source detail' : 'Fit references to the output canvas'}</em></span><ChevronDown size={15} /></summary><fieldset><legend>Choose how much source-image detail H3 preserves</legend><label className={refImageSize === 'match' ? 'selected' : ''}><input type="radio" name="output-reference-fidelity" checked={refImageSize === 'match'} onChange={() => setRefImageSize('match')} /><span><strong>Balanced</strong><small>Fit references to the output canvas. Faster and uses less memory.</small></span></label><label className={refImageSize === 'max' ? 'selected' : ''}><input type="radio" name="output-reference-fidelity" checked={refImageSize === 'max'} onChange={() => setRefImageSize('max')} /><span><strong>Maximum identity</strong><small>Keep more original image detail. Slower and uses more memory.</small></span></label></fieldset></details>}
             <section className="ref2va-setting-group" aria-labelledby="render-plan-title"><div className="ref2va-setting-heading"><span>01</span><div><strong id="render-plan-title">Render plan</strong><small>Set timing and the primary H3 sampling recipe.</small></div></div><div className="render-controls"><div className="field-group"><label htmlFor="duration">Duration</label><div className="range-line"><input id="duration" type="range" min="2" max="15" step="0.5" value={duration} onChange={(event) => setDuration(Number(event.target.value))} /><output>{duration}s</output></div></div><SelectField label="Sampling quality" value={turbo === '4' && mode !== 'reference' ? '8' : turbo} onChange={(value) => setTurbo(value as 'off' | '4' | '8')} options={mode === 'reference' ? [["off", 'Native quality · 30 steps'], ["8", 'Turbo 8 · Ref2VA v1.0 · 768p'], ["4", 'Turbo 4 · Ref2VA v0.1']] : [["off", 'Native quality · 30 steps'], ["8", 'Official Turbo 8']]} /></div>
-            {mode === 'reference' && <div className="ref2va-seed-control">
-              <div className="field-group"><label htmlFor="h3-ref2va-seed">Ref2VA seed</label><input id="h3-ref2va-seed" className="number-input" type="number" min={0} max={999999999999} step={1} value={seed} disabled={seedLocked || submitting || stillSubmitting} onChange={(event) => setSeed(Math.max(0, Math.min(999999999999, Math.floor(Number(event.target.value) || 0))))} /></div>
+            <div className="ref2va-seed-control">
+              <div className="field-group"><label htmlFor="h3-ref2va-seed">MiniMax H3 seed</label><input id="h3-ref2va-seed" className="number-input" type="number" min={0} max={999999999999} step={1} value={seed} disabled={seedLocked || submitting || stillSubmitting} onChange={(event) => setSeed(Math.max(0, Math.min(999999999999, Math.floor(Number(event.target.value) || 0))))} /></div>
               <div className="ref2va-seed-actions">
                 <button type="button" className="seed-step-button" aria-label="Decrease Ref2VA seed by one" title="Use the previous seed value" disabled={seed <= 0 || submitting || stillSubmitting} onClick={() => setSeed(seed - 1)}>−1</button>
                 <button type="button" className="seed-step-button" aria-label="Increase Ref2VA seed by one" title="Use the next seed value" disabled={seed >= 999999999999 || submitting || stillSubmitting} onClick={() => setSeed(seed + 1)}>+1</button>
-                <button type="button" className="secondary-button" aria-pressed={seedLocked} aria-label={seedLocked ? 'Unlock Ref2VA seed' : 'Lock Ref2VA seed'} title={seedLocked ? 'Unlock to type or randomize this seed. The −1 and +1 buttons remain available.' : 'Keep this seed for every Ref2VA render'} disabled={submitting || stillSubmitting} onClick={() => setSeedLocked(!seedLocked)}><LockKeyhole size={15} />{seedLocked ? 'Locked' : 'Unlocked'}</button>
-                <button type="button" className="secondary-button" aria-label="Randomize Ref2VA seed" title={seedLocked ? 'Unlock the seed before randomizing' : 'Choose a different random seed'} disabled={seedLocked || submitting || stillSubmitting} onClick={() => setSeed(randomH3Seed(seed))}><Dices size={15} />Randomize</button>
+                <button type="button" className="secondary-button" aria-pressed={seedLocked} aria-label={seedLocked ? 'Unlock MiniMax H3 seed' : 'Lock MiniMax H3 seed'} title={seedLocked ? 'Unlock to type or randomize this seed. The −1 and +1 buttons remain available.' : 'Keep this seed for Ref2VA and I2V renders'} disabled={submitting || stillSubmitting} onClick={() => setSeedLocked(!seedLocked)}><LockKeyhole size={15} />{seedLocked ? 'Locked' : 'Unlocked'}</button>
+                <button type="button" className="secondary-button" aria-label="Randomize MiniMax H3 seed" title={seedLocked ? 'Unlock the seed before randomizing' : 'Choose a different random seed'} disabled={seedLocked || submitting || stillSubmitting} onClick={() => setSeed(randomH3Seed(seed))}><Dices size={15} />Randomize</button>
               </div>
-              <p className="field-help">{seedLocked ? 'Locked: this seed stays fixed across Ref2VA submissions. Use −1 or +1 for a deliberate one-step variation; unlock to type or randomize.' : 'Unlocked: this seed changes after each successful Ref2VA submission. Lock it to reuse the same result settings.'}</p>
-            </div>}
+              <p className="field-help">{seedLocked ? 'Locked: this seed stays fixed across Ref2VA and I2V submissions. Use −1 or +1 for a deliberate one-step variation; unlock to type or randomize.' : 'Unlocked: this seed changes after each successful H3 submission. Lock it to carry the Ref2VA seed into I2V.'}</p>
+            </div>
             <p className="field-help">Sampling quality changes only the selected sampler profile. Your resolution, duration, steps, reference fidelity, preview, advanced sampling, LoRAs, and upscale choices stay exactly as you set them. Use a named preset or Reset only when you want to replace a group of settings.</p>
             {turbo === '8' && <><SelectField label="Turbo 8 profile" value={turbo8Profile} onChange={(value) => setTurbo8Profile(value as Turbo8Profile)} options={[["stable", 'Stable · Euler + Simple · faces/dialogue'], ["balanced", 'Balanced · res_multistep + Simple'], ["motion", 'Motion · res_multistep + Beta']]}/><NumberField label="Turbo 8 steps" value={steps} min={4} max={12} onChange={setSteps} /><p className="field-help">8 is the trained default. Use 9–10 steps when you want to test for a small coherence or detail gain; values are capped at 12 to keep the Turbo recipe practical.</p></>}
             </section>
@@ -2700,6 +2794,7 @@ const workspaceTips: Record<View, { title: string; description: string; tips: Ar
   queue: { title: 'Queue', description: 'Monitor work running on the local ComfyUI engine.', tips: [['Progress', 'The runtime and sampler indicators show whether a job is waiting, rendering, or nearing completion.'], ['Cancel', 'Stopping a queued or running job prevents further work; completed outputs remain available.'], ['Errors', 'Open the job details and check the ComfyUI connection or missing model/node message before retrying.']] },
   library: { title: 'Video library', description: 'Review finished images and videos without changing their originals.', tips: [['Preview', 'Use Preview to open any still or clip in a lightbox. Escape, Close, or click outside the panel to dismiss it.'], ['Frames', 'Frame bookmarks lets you extract reusable frames from a video and send one to LTX 2.5 as a starting frame.'], ['Clip editor', 'Open Clip editor to trim, reorder, and assemble copies; source renders remain untouched until you export.']] },
   editor: { title: 'Clip editor', description: 'Trim, reorder, and assemble clips into a separate timeline.', tips: [['Media bin', 'Imported files and completed renders are references to the originals. Add copies to the timeline as needed.'], ['Trim', 'Double-click a timeline clip to set start and end points, then save the trim.'], ['Frames', 'Grab start or end frames for I2V, first/last-frame workflows, or reusable reference pictures.'], ['Export', 'Export timeline creates a new joined video; it does not overwrite source clips.']] },
+  clipmaster: { title: 'Clip Master Beta', description: 'Select a video for precise frame selection, frame extraction, and isolated trimmed exports.', tips: [['Select a clip', 'Choose any completed video render here, or select a local video. The existing Clip editor remains separate and unchanged.'], ['Exact frames', 'Use the frame controls to set inclusive start and end frame numbers. The scrubber and the player remain synchronized to that frame index.'], ['Extract frames', 'Save the start, end, current, or multiple chosen frames into ComfyUI/output/ClipMaster/<source-clip-name>/.'], ['Export', 'Trimmed videos use an incrementing versioned filename and are saved inside the configured ComfyUI output folder without replacing an earlier export.']] },
   settings: { title: 'Settings', description: 'Connect the studio to your local engine and configure defaults.', tips: [['Connection', 'Keep ComfyUI running at the configured local address, then use Test connection to refresh status.'], ['Models', 'Rescan after adding files. The app indexes model folders in place and does not move or copy them.'], ['Defaults', 'Generation defaults apply to the main Create workspace; LTX and Z-Image keep their own workspace settings.'], ['Local assistant', 'Ollama or LM Studio can refine prompts locally when configured; prompts are not sent to a cloud service.']] },
 }
 
@@ -2950,7 +3045,7 @@ function SettingsView({ settings, setSettings, info, models, h3Report, scanning,
       <p className="settings-note">{settings.llmProvider === 'lmstudio' ? 'LM Studio is opt-in and restricted to loopback addresses (localhost, 127.0.0.1, or ::1). Start its Local Server, choose a loaded model, then save settings.' : 'Prompts go directly to the local Ollama server. Embedding and cloud-backed models are excluded.'}</p>
     </section>
     <section className="settings-section" id="settings-models"><div className="settings-heading"><div><HardDrive size={19} /><span><strong>Model locations</strong><small>Files are indexed in place and are never moved or copied.</small></span></div><button className="secondary-button" onClick={onScan} disabled={scanning}>{scanning ? <LoaderCircle size={16} className="spin" /> : <RefreshCw size={16} />}{scanning ? 'Scanning…' : 'Rescan'}</button></div><div className="path-table">{pathRows.map((row) => { const count = models.filter((model) => model.kind === row.kind).length; return <div className="path-row" key={row.kind}><div className="path-kind"><Folder size={17} /><span><strong>{row.label}</strong><small>{row.note}</small></span></div><div className="path-input"><input value={settings.paths[row.kind]} onChange={(event) => setSettings({ ...settings, paths: { ...settings.paths, [row.kind]: event.target.value } })} /><button onClick={async () => { const path = await window.minimax.chooseDirectory(settings.paths[row.kind]); if (path) setSettings({ ...settings, paths: { ...settings.paths, [row.kind]: path } }) }} aria-label={`Browse for ${row.label}`}><FolderOpen size={17} /></button></div><span className="file-count">{count} files</span></div>})}</div></section>
-    <section className="settings-section" id="settings-storage"><div className="settings-heading"><div><FolderOpen size={19} /><span><strong>Output & clip tools</strong><small>Completed videos, extracted frames, and editor exports stay local.</small></span></div></div><div className="connection-row"><div className="field-group grow"><label htmlFor="output-path">Output directory</label><input id="output-path" value={settings.outputDirectory} onChange={(event) => setSettings({ ...settings, outputDirectory: event.target.value })} /></div><button className="secondary-button test-button" onClick={async () => { const path = await window.minimax.chooseDirectory(settings.outputDirectory); if (path) setSettings({ ...settings, outputDirectory: path }) }}><FolderOpen size={16} />Browse</button></div><div className="connection-row clip-tool-path"><div className="field-group grow"><label htmlFor="ffmpeg-path">FFmpeg executable</label><input id="ffmpeg-path" value={settings.ffmpegPath} onChange={(event) => setSettings({ ...settings, ffmpegPath: event.target.value })} /></div></div><p className="settings-note">The clip editor uses FFmpeg for frame extraction, trim points, joining, and full-project export.</p><label className="settings-check"><input type="checkbox" checked={settings.blurNsfwLivePreviews} onChange={(event) => setSettings({ ...settings, blurNsfwLivePreviews: event.target.checked })} /><span><strong>Blur sensitive live previews</strong><small>When enabled, the local preview blurs if the render prompt contains explicit-adult wording. Hover or keyboard-focus the preview to reveal it. This never blocks, changes, or uploads a render.</small></span></label><div className="legacy-migration-settings"><div><strong>Previous Studio data</strong><small>{legacyMigration?.needsBrowserStorageRepair ? 'Restore the previous local characters, projects, and workspace state. This replaces Oyama browser-backed workspace data, then requires a restart.' : legacyMigration?.migrated ? 'The previous MiniMax Studio profile was imported. Run this again only to collect files added to the old app after the first import.' : legacyMigration?.available ? 'Import your previous MiniMax Studio profile into Oyama. Existing Oyama data is never replaced.' : 'No previous MiniMax Studio profile was found on this computer.'}</small></div><button type="button" className="secondary-button" disabled={!legacyMigration?.available || legacyMigrationRunning} onClick={onRunLegacyMigration}>{legacyMigrationRunning ? <LoaderCircle className="spin" size={15} /> : <History size={15} />}{legacyMigrationRunning ? 'Importing…' : legacyMigration?.needsBrowserStorageRepair ? 'Restore projects & characters' : legacyMigration?.migrated ? 'Import missing data again' : 'Import previous data'}</button></div></section>
+    <section className="settings-section" id="settings-storage"><div className="settings-heading"><div><FolderOpen size={19} /><span><strong>Output & clip tools</strong><small>Completed videos, extracted frames, and editor exports stay local.</small></span></div></div><div className="connection-row"><div className="field-group grow"><label htmlFor="output-path">ComfyUI output directory</label><input id="output-path" value={settings.outputDirectory} onChange={(event) => setSettings({ ...settings, outputDirectory: event.target.value })} /></div><button className="secondary-button test-button" onClick={async () => { const path = await window.minimax.chooseDirectory(settings.outputDirectory); if (path) setSettings({ ...settings, outputDirectory: path }) }}><FolderOpen size={16} />Browse</button></div><div className="connection-row"><div className="field-group grow"><label htmlFor="clip-master-output-path">Clip Master default output folder</label><input id="clip-master-output-path" value={settings.clipMasterOutputDirectory} onChange={(event) => setSettings({ ...settings, clipMasterOutputDirectory: event.target.value })} /></div><button className="secondary-button test-button" onClick={async () => { const path = await window.minimax.chooseDirectory(settings.clipMasterOutputDirectory); if (path) setSettings({ ...settings, clipMasterOutputDirectory: path }) }}><FolderOpen size={16} />Browse</button></div><p className="settings-note">Defaults to ComfyUI/output/video. Clip Master creates a separate ClipMaster/source-clip folder here for frames and suggests this folder when exporting a trimmed video; the save dialog can still use another location.</p><div className="connection-row clip-tool-path"><div className="field-group grow"><label htmlFor="ffmpeg-path">FFmpeg executable</label><input id="ffmpeg-path" value={settings.ffmpegPath} onChange={(event) => setSettings({ ...settings, ffmpegPath: event.target.value })} /></div></div><p className="settings-note">The clip editor uses FFmpeg for frame extraction, trim points, joining, and full-project export.</p><label className="settings-check"><input type="checkbox" checked={settings.blurNsfwLivePreviews} onChange={(event) => setSettings({ ...settings, blurNsfwLivePreviews: event.target.checked })} /><span><strong>Blur sensitive live previews</strong><small>When enabled, the local preview blurs if the render prompt contains explicit-adult wording. Hover or keyboard-focus the preview to reveal it. This never blocks, changes, or uploads a render.</small></span></label><div className="legacy-migration-settings"><div><strong>Previous Studio data</strong><small>{legacyMigration?.needsBrowserStorageRepair ? 'Restore the previous local characters, projects, and workspace state. This replaces Oyama browser-backed workspace data, then requires a restart.' : legacyMigration?.migrated ? 'The previous MiniMax Studio profile was imported. Run this again only to collect files added to the old app after the first import.' : legacyMigration?.available ? 'Import your previous MiniMax Studio profile into Oyama. Existing Oyama data is never replaced.' : 'No previous MiniMax Studio profile was found on this computer.'}</small></div><button type="button" className="secondary-button" disabled={!legacyMigration?.available || legacyMigrationRunning} onClick={onRunLegacyMigration}>{legacyMigrationRunning ? <LoaderCircle className="spin" size={15} /> : <History size={15} />}{legacyMigrationRunning ? 'Importing…' : legacyMigration?.needsBrowserStorageRepair ? 'Restore projects & characters' : legacyMigration?.migrated ? 'Import missing data again' : 'Import previous data'}</button></div></section>
   </div></div></div>
 }
 

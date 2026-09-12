@@ -3,6 +3,7 @@ import { AlertCircle, Check, CircleStop, Dices, Film, Gauge, ImagePlus, LoaderCi
 import { buildZImage, type ZImageVariant } from '../lib/zimage'
 import { choices, type ObjectInfo } from '../lib/comfyInfo'
 import { RenderSize } from './RenderSize'
+import { SmartPromptEditor } from './SmartPromptEditor'
 import type { MediaFile } from '../types'
 
 type StoredWorkspace = {
@@ -191,7 +192,7 @@ export function ZImageWorkspace({
         </fieldset>
         <div className="field-group">
           <div className="field-label"><label htmlFor="zimage-prompt">Image prompt</label><span>{prompt.length.toLocaleString()} characters</span></div>
-          <textarea id="zimage-prompt" value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="Describe the subject, environment, composition, lens, lighting, color, and opening-frame details…" disabled={busy} />
+          <SmartPromptEditor id="zimage-prompt" value={prompt} onChange={setPrompt} placeholder="Describe the subject, environment, composition, lens, lighting, color, and opening-frame details… Type // for production commands." disabled={busy} />
           <div className="zimage-prompt-actions"><button className="secondary-button" onClick={() => void enhance()} disabled={busy || assisting || !ollamaAvailable || !prompt.trim()} title={ollamaAvailable ? `Enhance with ${ollamaModel}` : `Configure ${llmProvider === 'lmstudio' ? 'LM Studio' : 'Ollama'} in Settings`}>{assisting ? <LoaderCircle size={15} className="spin" /> : <WandSparkles size={15} />}Enhance with {llmProvider === 'lmstudio' ? 'LM Studio' : 'Ollama'}</button><small>{ollamaAvailable ? `${ollamaModel} · local` : `${llmProvider === 'lmstudio' ? 'LM Studio' : 'Ollama'} unavailable`}</small></div>
         </div>
 

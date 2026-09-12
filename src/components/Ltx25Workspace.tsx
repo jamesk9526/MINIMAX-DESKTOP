@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { AlertCircle, Check, CircleStop, Film, Gauge, Image as ImageIcon, LoaderCircle, Play, RotateCcw, Sparkles, WandSparkles } from 'lucide-react'
 import { ImageCrop } from './ImageCrop'
 import { RenderConstruction } from './RenderConstruction'
+import { SmartPromptEditor } from './SmartPromptEditor'
 import type { AppSettings, GenerationJob, Ltx25GenerationOptions, Ltx25ModelSelection, MediaFile } from '../types'
 import { ltx25FrameCount } from '../lib/ltx25Workflow'
 import { LTX25_RESOLUTIONS, type Ltx25Orientation, ltx25ResolutionLabel } from '../lib/ltx25Resolutions'
@@ -124,7 +125,7 @@ export function Ltx25Workspace({ settings, models, pipelineReady, missingNodes, 
         <div className="field-group prompt-field">
           <div className="field-label"><label htmlFor="ltx-prompt">Creative direction</label><span>{state.prompt.length.toLocaleString()} characters</span></div>
           {state.mode === 'image' && state.identityPrompt.trim() && <details className="prompt-system-chip"><summary><span>Identity Prompt</span><small>Applied with this image handoff</small></summary><p>{state.identityPrompt}</p></details>}
-          <textarea id="ltx-prompt" value={state.prompt} onChange={(event) => set('prompt', event.target.value)} placeholder={state.mode === 'image' ? 'Describe how the first frame moves, camera direction, dialogue, and sound…' : 'Describe the scene, action, camera, lighting, dialogue, and sound…'} />
+          <SmartPromptEditor id="ltx-prompt" value={state.prompt} onChange={(value) => set('prompt', value)} placeholder={state.mode === 'image' ? 'Describe how the first frame moves, camera direction, dialogue, and sound… Type // for commands.' : 'Describe the scene, action, camera, lighting, dialogue, and sound… Type // for commands.'} />
           <label className="no-dialogue-toggle" title="Adds a render instruction that blocks spoken words, narration, singing, lip-sync, captions, and text overlays."><input type="checkbox" checked={state.noDialogue} onChange={(event) => set('noDialogue', event.target.checked)} /><span><strong>No dialogue</strong><small>{state.noDialogue ? 'Ambient sound only' : 'Dialogue and lip-sync allowed'}</small></span></label>
           <div className="prompt-tools"><div className="prompt-tool-buttons"><button type="button" onClick={() => void refine()} disabled={!ollamaAvailable || refining || !state.prompt.trim()}>{refining ? <LoaderCircle size={14} className="spin" /> : <Sparkles size={14} />}Refine for LTX</button></div><span className={`local-model-chip ${ollamaAvailable ? 'online' : ''}`}><span />{ollamaAvailable ? llm.model : `${llm.label} offline`}</span></div>
           {suggestion && <div className="assistant-result"><div className="assistant-result-heading"><span><Sparkles size={14} />Local suggestion</span><small>Review before applying</small></div><textarea aria-label="LTX prompt suggestion" value={suggestion} readOnly /><div className="assistant-actions"><button className="secondary-button" onClick={() => setSuggestion('')}>Dismiss</button><button className="primary-button" onClick={() => { set('prompt', suggestion); setSuggestion('') }}><Check size={14} />Use suggestion</button></div></div>}

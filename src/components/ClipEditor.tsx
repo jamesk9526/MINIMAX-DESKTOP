@@ -27,10 +27,11 @@ function loadProjects() {
   }
 }
 
-export function ClipEditor({ settings, jobs, onUseFrame, onNotice }: {
+export function ClipEditor({ settings, jobs, onUseFrame, onOpenClipMaster, onNotice }: {
   settings: AppSettings
   jobs: GenerationJob[]
   onUseFrame(file: MediaFile, target: 'i2v' | 'first' | 'last' | 'reference', clip: ClipItem): void
+  onOpenClipMaster?(clip: ClipItem): void
   onNotice(tone: 'error' | 'success' | 'neutral', text: string): void
 }) {
   const [projects, setProjects] = useState<ClipProject[]>(loadProjects)
@@ -78,6 +79,10 @@ export function ClipEditor({ settings, jobs, onUseFrame, onNotice }: {
     setFrame(null)
     setStart(clip.start ?? 0)
     setEnd(clip.end ?? clip.duration ?? 0)
+  }
+  const openClipMaster = (clip: ClipItem) => {
+    setSelected(null)
+    onOpenClipMaster?.(clip)
   }
   const saveTrim = () => {
     if (!selected) return
@@ -172,7 +177,7 @@ export function ClipEditor({ settings, jobs, onUseFrame, onNotice }: {
 
       <div className="editor-main-column">
         <section className="program-monitor">
-          <div className="editor-pane-heading"><div><strong>Preview</strong><span>{programClip ? programClip.name : 'Select a clip from the bin or timeline'}</span></div>{exportUrl && <span className="export-chip">Latest export</span>}</div>
+          <div className="editor-pane-heading"><div><strong>Preview</strong><span>{programClip ? programClip.name : 'Select a clip from the bin or timeline'}</span></div><div className="program-monitor-actions">{programClip && onOpenClipMaster && <button className="secondary-button" onClick={() => openClipMaster(programClip)}><Scissors size={14} />Open in Clip Master Beta</button>}{exportUrl && <span className="export-chip">Latest export</span>}</div></div>
           <div className="program-stage">{programClip ? <ProgramPlayback key={`${programClip.id}:${programClip.source}`} clip={programClip} /> : <div><Scissors size={30} /><strong>No clip selected</strong><span>Choose media to preview it here.</span></div>}</div>
         </section>
 
@@ -197,7 +202,7 @@ export function ClipEditor({ settings, jobs, onUseFrame, onNotice }: {
       <div className="trim-fields"><label>Start (seconds)<input type="number" min="0" max={selected.duration} step="0.04" value={start} onChange={(event) => setStart(Number(event.target.value))} /></label><label>End (seconds)<input type="number" min="0.04" max={selected.duration} step="0.04" value={end} onChange={(event) => setEnd(Number(event.target.value))} /></label><button className="secondary-button" onClick={saveTrim}><Scissors size={15} />Set start / end</button></div>
       <div className="frame-grab-actions"><button type="button" className="secondary-button" onClick={() => void grab('first')} disabled={busy === 'frame'}>{frameEdge === 'first' ? <LoaderCircle className="spin" size={15} /> : <Image size={15} />}{frameEdge === 'first' ? 'Extracting start…' : 'Grab start frame'}</button><button type="button" className="secondary-button" onClick={() => void grab('last')} disabled={busy === 'frame'}>{frameEdge === 'last' ? <LoaderCircle className="spin" size={15} /> : <Image size={15} />}{frameEdge === 'last' ? 'Extracting end…' : 'Grab end frame'}</button>{busy === 'frame' && <span role="status">Decoding one frame with FFmpeg…</span>}</div>
       {frame && <div className="frame-route"><img src={frame.preview} alt="Extracted frame" /><div><strong>How should this frame be used?</strong><small>The next render remains separate until you add it to this timeline and export.</small><button onClick={() => onUseFrame(frame, 'i2v', selected)}>Use as I2V first frame</button><button onClick={() => onUseFrame(frame, 'first', selected)}>First + last: first</button><button onClick={() => onUseFrame(frame, 'last', selected)}>First + last: last</button><button onClick={() => onUseFrame(frame, 'reference', selected)}>Reference picture</button></div></div>}
-      <footer><button className="danger-button" onClick={() => { update((value) => ({ ...value, clips: value.clips.filter((clip) => clip.id !== selected.id) })); if (preview?.id === selected.id) setPreview(null); setSelected(null) }}><Trash2 size={15} />Remove from timeline</button><button className="secondary-button" onClick={() => setSelected(null)}>Done</button></footer>
+      <footer><button className="danger-button" onClick={() => { update((value) => ({ ...value, clips: value.clips.filter((clip) => clip.id !== selected.id) })); if (preview?.id === selected.id) setPreview(null); setSelected(null) }}><Trash2 size={15} />Remove from timeline</button><button className="secondary-button" onClick={() => openClipMaster(selected)} disabled={!onOpenClipMaster}><Scissors size={15} />Open in Clip Master Beta</button><button className="secondary-button" onClick={() => setSelected(null)}>Done</button></footer>
     </section></div>}
   </div>
 }

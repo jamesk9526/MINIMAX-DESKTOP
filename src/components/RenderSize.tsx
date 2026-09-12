@@ -1,12 +1,7 @@
 import { useEffect, useState } from 'react'
 import { LTX25_MAX_PIXELS, LTX25_RESOLUTIONS, ltx25ResolutionLabel } from '../lib/ltx25Resolutions'
+import { MINIMAX_VIDEO_RESOLUTION_GROUPS } from '../lib/videoResolutions'
 
-const sizes: Record<string, string[]> = {
-  landscape: ['608x352', '736x416', '768x448', '864x480', '960x544', '1024x576', '1056x608', '1152x640', '1216x672', '1280x736', '1344x768'],
-  ultrawide: ['672x288', '896x384', '1120x480', '1216x512', '1344x576'],
-  portrait: ['352x608', '416x736', '448x768', '480x864', '544x960', '576x1024', '608x1056', '640x1152', '672x1216', '736x1280', '768x1344'],
-  square: ['512x512', '640x640', '768x768'],
-}
 type Orientation = 'landscape' | 'ultrawide' | 'portrait' | 'square'
 
 const imageSizes: Record<string, string[]> = {
@@ -23,7 +18,7 @@ const imageSizes: Record<string, string[]> = {
 export function RenderSize({ value, onChange, provider = 'minimax' }: { value: string; onChange(value: string): void; provider?: 'minimax' | 'ltx25' | 'zimage' }) {
   const [w, h] = value.split('x').map(Number)
   const orientation: Orientation = w === h ? 'square' : w / h >= 2.1 ? 'ultrawide' : w > h ? 'landscape' : 'portrait'
-  const resolutionOptions: Record<Orientation, readonly string[]> = provider === 'ltx25' ? LTX25_RESOLUTIONS : sizes
+  const resolutionOptions: Record<Orientation, readonly string[]> = provider === 'ltx25' ? LTX25_RESOLUTIONS : MINIMAX_VIDEO_RESOLUTION_GROUPS
   const listed = resolutionOptions[orientation].includes(value)
   const [custom, setCustom] = useState(!listed)
   const [customWidth, setCustomWidth] = useState(Number.isFinite(w) ? w : 1344)

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { AlertCircle, Check, CircleStop, Disc3, Gauge, Headphones, LoaderCircle, Music2, Play, RotateCcw, Sparkles, WandSparkles } from 'lucide-react'
 import type { AceStepGenerationOptions, AceStepModelSelection, AppSettings, GenerationJob } from '../types'
 import { resolveLlmConnection } from '../lib/llmProvider'
+import { SmartPromptEditor } from './SmartPromptEditor'
 
 type MusicState = {
   model: 'sft' | 'base'
@@ -87,7 +88,7 @@ export function AceStepWorkspace({ settings, models, connected, pipelineReady, m
           <label className={state.model === 'base' ? 'selected' : ''}><input type="radio" name="ace-model" checked={state.model === 'base'} disabled={!models.base} onChange={() => set('model', 'base')} /><span><strong>XL Base</strong><small>Base model · official CFG 6</small></span><em>{models.base ? 'Ready' : 'Missing'}</em></label>
         </div></fieldset>
 
-        <div className="field-group prompt-field ace-direction-field"><div className="field-label"><label htmlFor="ace-tags">Music direction</label><span>{state.tags.length.toLocaleString()} characters</span></div><textarea id="ace-tags" value={state.tags} onChange={(event) => set('tags', event.target.value)} placeholder="Genre, mood, instruments, vocal style, arrangement, and production texture…" />
+        <div className="field-group prompt-field ace-direction-field"><div className="field-label"><label htmlFor="ace-tags">Music direction</label><span>{state.tags.length.toLocaleString()} characters</span></div><SmartPromptEditor id="ace-tags" value={state.tags} onChange={(value) => set('tags', value)} placeholder="Genre, mood, instruments, vocal style, arrangement, and production texture… Type // for production commands." />
           <div className="prompt-tools"><div className="prompt-tool-buttons"><button type="button" onClick={() => void refine()} disabled={!ollamaAvailable || refining || !state.tags.trim()}>{refining ? <LoaderCircle size={14} className="spin" /> : <WandSparkles size={14} />}Refine music direction</button></div><span className={`local-model-chip ${ollamaAvailable ? 'online' : ''}`}><span />{ollamaAvailable ? llm.model : `${llm.label} offline`}</span></div>
           {suggestion && <div className="assistant-result"><div className="assistant-result-heading"><span><Sparkles size={14} />Local suggestion</span><small>Review before applying</small></div><textarea aria-label="ACE-Step music direction suggestion" value={suggestion} readOnly /><div className="assistant-actions"><button className="secondary-button" onClick={() => setSuggestion('')}>Dismiss</button><button className="primary-button" onClick={() => { set('tags', suggestion); setSuggestion('') }}><Check size={14} />Use suggestion</button></div></div>}
         </div>
