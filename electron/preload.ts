@@ -34,7 +34,7 @@ contextBridge.exposeInMainWorld('minimax', {
   listOllamaModels: (url: string, provider: 'ollama' | 'lmstudio' = 'ollama') => ipcRenderer.invoke('ollama:list', url, provider),
   generateWithOllama: (url: string, model: string, prompt: string, provider: 'ollama' | 'lmstudio' = 'ollama') => ipcRenderer.invoke('ollama:generate', url, model, prompt, provider),
   generateWithOllamaVision: (url: string, model: string, prompt: string, imagePaths: string[], provider: 'ollama' | 'lmstudio' = 'ollama') => ipcRenderer.invoke('ollama:vision', url, model, prompt, imagePaths, provider),
-  generateStructuredWithOllama: (url: string, model: string, prompt: string, schema: Record<string, unknown>, provider: 'ollama' | 'lmstudio' = 'ollama') => ipcRenderer.invoke('ollama:structured', url, model, prompt, schema, provider),
+  generateStructuredWithOllama: (url: string, model: string, prompt: string, schema: Record<string, unknown>, provider: 'ollama' | 'lmstudio' = 'ollama', imagePaths: string[] = []) => ipcRenderer.invoke('ollama:structured', url, model, prompt, schema, provider, imagePaths),
   getLanStatus: () => ipcRenderer.invoke('lan:status'),
   syncMobileCharacters: (characters: unknown[]) => ipcRenderer.invoke('lan:sync-characters', characters),
   rotateLanToken: () => ipcRenderer.invoke('lan:rotate-token'),

@@ -121,7 +121,7 @@ export default function MobileApp() {
     setMode(next === 'ltx25' && nextWorkspace.mode === 'reference' ? 'text' : nextWorkspace.mode ?? 'text')
     setPrompt(nextWorkspace.prompt ?? '')
     setNoDialogue(nextWorkspace.noDialogue ?? true)
-    setResolution(nextWorkspace.resolution ?? (next === 'ltx25' ? '1280x736' : '768x448'))
+    setResolution(nextWorkspace.resolution ?? '1056x608')
     setDuration(nextWorkspace.duration ?? 5)
     setQuality(nextWorkspace.quality ?? (next === 'ltx25' ? 'quality' : 'turbo'))
     setUpscale(next === 'ltx25' ? 'off' : nextWorkspace.upscale ?? 'off')

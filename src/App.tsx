@@ -12,6 +12,7 @@ import {
   CircleStop,
   Clock3,
   Copy,
+  Dices,
   ExternalLink,
   Film,
   Folder,
@@ -88,7 +89,7 @@ import { CHARACTER_LIBRARY_EVENT, characterReferences, loadCharacterProjects, up
 import { loadWardrobeProjects, wardrobeReferences, WARDROBE_LIBRARY_EVENT } from './lib/wardrobeLibrary'
 import { loadLocationProjects, locationReferences, updateLocationProject, LOCATION_LIBRARY_EVENT } from './lib/locationLibrary'
 import { loadHairStyleProjects } from './lib/hairLibrary'
-import { allocateWorkspaceReferences, buildPromptAssistantRequest, composeReferenceInstructions } from './lib/promptComposer'
+import { allocateWorkspaceReferences, buildPromptAssistantRequest, composeReferenceInstructions, formatH3PromptOutput, h3PromptDirectionSchema } from './lib/promptComposer'
 import { applyDialoguePolicy, applyNaturalMovementPolicy, buildCharacterDialogueRequest } from './lib/dialogPolicy'
 import { COPILOT_DECISION_EVENT, offerCopilotSuggestion } from './lib/copilot'
 import { resolveLlmConnection } from './lib/llmProvider'
@@ -140,6 +141,7 @@ type PersistedWorkspace = {
   loraStrength: number
   userLoras: Array<{ name: string; strength: number }>
   seed: number
+  seedLocked: boolean
   advanced: boolean
   liveEnabled: boolean
   livePreviewMode: 'standard' | 'h3-override'
@@ -183,10 +185,17 @@ function workspaceProjectLabel(scope: WorkspaceProjectScope) {
   return scope === 'create' ? 'MiniMax H3 / Ref2VA' : scope === 'ltx25' ? 'LTX 2.5' : scope === 'zimage' ? 'Create Image' : 'Music'
 }
 
+const H3_RANDOM_SEED_LIMIT = 1_000_000_000
+
+function randomH3Seed(previous?: number) {
+  const next = Math.floor(Math.random() * H3_RANDOM_SEED_LIMIT)
+  return next === previous ? (next + 1) % H3_RANDOM_SEED_LIMIT : next
+}
+
 const workspaceDefaults: PersistedWorkspace = {
-  mode: 'text', prompt: '', duration: 5, resolution: '1344x768', turbo: 'off', steps: 30,
+  mode: 'text', prompt: '', duration: 5, resolution: '1056x608', turbo: 'off', steps: 30,
   sampler: 'res_multistep', scheduler: 'simple', experimentalSampling: false, refImageSize: 'match', noDialogue: true, naturalMovement: true, clothingPolicy: 'wardrobe',
-  sigmaShiftMode: 'model', shiftVideo: 12, shiftAudio: 3, loraStrength: 1, userLoras: [{ name: '', strength: 1 }, { name: '', strength: 1 }, { name: '', strength: 1 }], seed: Math.floor(Math.random() * 1_000_000_000),
+  sigmaShiftMode: 'model', shiftVideo: 12, shiftAudio: 3, loraStrength: 1, userLoras: [{ name: '', strength: 1 }, { name: '', strength: 1 }, { name: '', strength: 1 }], seed: randomH3Seed(), seedLocked: true,
   advanced: false, liveEnabled: true, livePreviewMode: 'standard', upscaleMode: 'off', textEncoderPreference: 'fast', turbo8Profile: 'balanced', rtxModel: '', firstFrame: null,
   lastFrame: null, referenceImages: [], referenceVideos: [], referenceAudios: [], selectedReferenceCharacterIds: [], selectedReferenceLocationIds: [], activeJobId: null, movieHandoff: null,
 }
@@ -236,7 +245,9 @@ function samplerProgressSummary(job: GenerationJob | undefined, now: number) {
   const progress = Math.min(100, Math.round((job.currentStep / job.totalSteps) * 100))
   const rate = job.estimatedSamplerStepMs
   const nextStepIn = rate && job.lastSamplerStepAt ? Math.max(0, rate - (now - job.lastSamplerStepAt)) : undefined
-  return { progress, currentStep: job.currentStep, totalSteps: job.totalSteps, rate, nextStepIn }
+  const remainingSteps = Math.max(0, job.totalSteps - job.currentStep)
+  const remainingMs = rate !== undefined ? rate * remainingSteps : undefined
+  return { progress, currentStep: job.currentStep, totalSteps: job.totalSteps, rate, nextStepIn, remainingSteps, remainingMs }
 }
 
 function buildCharacterDetailInstructions(characters: CharacterProject[], enabled: boolean) {
@@ -391,6 +402,36 @@ function syncReferencePrompt(value: string, previous: MovieReferenceBinding[], n
   return [result, nextInstructions ? `References: ${nextInstructions}` : ''].filter(Boolean).join('\n\n')
 }
 
+type ParsedH3Prompt = { description: string; soundscape?: string; music?: string }
+
+function parseH3PromptSections(prompt: string): ParsedH3Prompt {
+  const source = prompt.trim().replace(/^```[^\r\n]*\r?\n/, '').replace(/\r?\n?```\s*$/, '').trim()
+  const sectionNames = ['subject_definitions', 'summary', 'retention_analysis', 'detailed_description', 'integrated_multimodal_description', 'overall_soundscape', 'non_diegetic_music']
+  const sectionPattern = new RegExp(`(?:^|\\n)[\\t ]*(${sectionNames.join('|')})[\\t ]*:[\\t ]*`, 'gim')
+  const matches = [...source.matchAll(sectionPattern)]
+  if (!matches.length) {
+    const description = source.replace(/^\s*(?:How the reference pictures align[^\n]*|For the target video[^\n]*)\s*\n+/i, '')
+    return { description }
+  }
+  const sections = new Map<string, string>()
+  for (let index = 0; index < matches.length; index += 1) {
+    const match = matches[index]
+    const name = match[1].toLowerCase()
+    const start = (match.index ?? 0) + match[0].length
+    const end = index + 1 < matches.length ? matches[index + 1].index ?? source.length : source.length
+    sections.set(name, source.slice(start, end).trim())
+  }
+  const prefix = source.slice(0, matches[0].index ?? 0).trim()
+  const alignment = /^(?:How the reference pictures align|For the target video)/i.test(prefix) ? '' : prefix
+  const detailed = (sections.get('detailed_description') ?? sections.get('integrated_multimodal_description') ?? '').replace(/^\[Shot 1\]\s*/i, '')
+  const description = [alignment, detailed].filter(Boolean).join('\n\n').trim()
+  return {
+    description: description || sections.get('summary') || sections.get('retention_analysis') || sections.get('subject_definitions') || source,
+    soundscape: sections.get('overall_soundscape'),
+    music: sections.get('non_diegetic_music'),
+  }
+}
+
 function composeH3Prompt(input: {
   prompt: string
   mode: GenerationMode
@@ -404,22 +445,31 @@ function composeH3Prompt(input: {
 }) {
   const activeBindings = input.clothingPolicy === 'wardrobe' ? input.bindings : input.bindings.filter((binding) => binding.purpose !== 'wardrobe')
   const referenceDirection = composeReferenceInstructions(activeBindings).join(' ')
-  const missingReferenceDirection = referenceDirection && !input.prompt.includes(referenceDirection) ? referenceDirection : ''
+  const parsed = parseH3PromptSections(input.prompt)
+  const draft = parsed.description || input.prompt.trim()
+  const missingReferenceDirection = referenceDirection && !draft.includes(referenceDirection) ? referenceDirection : ''
   const policyDirection = input.clothingPolicy === 'wardrobe'
     ? missingReferenceDirection
     : input.clothingPolicy === 'underwear'
       ? `${missingReferenceDirection} Clothing intent: keep only the underwear shown in each named adult character's own identity reference; do not add outer garments and ignore supplied wardrobe outfits.`
       : `${missingReferenceDirection} Clothing intent: adult fictional characters only; follow the scene prompt's explicit clothing or nudity direction. Clothing visible in identity references is not mandatory and must not override the scene prompt.`
-  const composed = applyNaturalMovementPolicy(applyDialoguePolicy([input.prompt.trim(), input.mode === 'reference' && input.bindings.length ? policyDirection.trim() : ''].filter(Boolean).join(' '), input.noDialogue), input.naturalMovement)
+  const composed = applyNaturalMovementPolicy(applyDialoguePolicy([draft, input.mode === 'reference' && input.bindings.length ? policyDirection.trim() : ''].filter(Boolean).join(' '), input.noDialogue), input.naturalMovement)
   // MiniMax H3 uses a distinct six-section contract in full-reference mode.
   // It needs explicit subjects and retention rules, whereas T2V/I2V use the
   // smaller audiovisual timeline format.
-  if (/^\s*(?:subject_definitions|summary|retention_analysis|detailed_description|how the reference pictures align|for the target video|integrated_multimodal_description):/i.test(composed)) return composed
-  const musicRequested = /\b(?:background music|score|soundtrack|music begins|music plays|song)\b/i.test(composed)
-  const soundscape = input.noDialogue
+  const musicRequested = /\b(?:background music|score|soundtrack|music begins|music plays|song)\b/i.test(`${composed}\n${parsed.music ?? ''}`)
+  const defaultSoundscape = input.noDialogue
     ? 'Only the natural ambience and synchronized physical sound effects described in the shot; no speech, singing, narration, captions, or text overlays.'
     : 'Natural ambience and synchronized physical sound effects match the visible actions and environment. No additional voices, narration, or sound events are introduced.'
-  const music = musicRequested ? 'Use only the non-diegetic music explicitly requested in the visual description; do not add any other score.' : 'N/A'
+  const suppliedSoundscape = parsed.soundscape?.trim()
+  const soundscapeDraft = suppliedSoundscape && !/^N\/?A$/i.test(suppliedSoundscape) ? suppliedSoundscape : defaultSoundscape
+  const noDialogueConstraint = 'No speech, singing, narration, or lip-sync.'
+  const soundscape = input.noDialogue && !soundscapeDraft.toLowerCase().includes(noDialogueConstraint.toLowerCase())
+    ? `${soundscapeDraft} ${noDialogueConstraint}`
+    : soundscapeDraft
+  const music = musicRequested
+    ? parsed.music?.trim() && !/^N\/?A$/i.test(parsed.music.trim()) ? parsed.music.trim() : 'Use only the non-diegetic music explicitly requested in the visual description; do not add any other score.'
+    : 'N/A'
   if (input.mode === 'reference') {
     const numbered = activeBindings.map((binding, index) => ({ ...binding, number: index + 1 }))
     const subjectLines: string[] = []
@@ -574,6 +624,7 @@ function App() {
   const rtxModels = choices(info, 'UpscaleModelLoader', 'model_name')
   const [rtxModel, setRtxModel] = useState(persisted.rtxModel)
   const [seed, setSeed] = useState(persisted.seed)
+  const [seedLocked, setSeedLocked] = useState(persisted.seedLocked)
   const [advanced, setAdvanced] = useState(persisted.advanced)
   const [firstFrame, setFirstFrame] = useState<MediaFile | null>(persisted.firstFrame)
   const [lastFrame, setLastFrame] = useState<MediaFile | null>(persisted.lastFrame)
@@ -815,14 +866,14 @@ function App() {
   useEffect(() => {
     const workspace: PersistedWorkspace = {
       mode, prompt, duration, resolution, turbo, steps, sampler, scheduler, experimentalSampling, refImageSize, noDialogue, naturalMovement, clothingPolicy,
-      sigmaShiftMode, shiftVideo, shiftAudio, loraStrength, userLoras, seed, advanced, liveEnabled, livePreviewMode,
+      sigmaShiftMode, shiftVideo, shiftAudio, loraStrength, userLoras, seed, seedLocked, advanced, liveEnabled, livePreviewMode,
       upscaleMode, turbo8Profile, rtxModel, firstFrame: withoutPreview(firstFrame), lastFrame: withoutPreview(lastFrame),
       referenceImages: referenceImages.map((file) => withoutPreview(file)!),
       referenceVideos: referenceVideos.map((file) => withoutPreview(file)!), textEncoderPreference,
       referenceAudios: referenceAudios.map((file) => withoutPreview(file)!), selectedReferenceCharacterIds, selectedReferenceLocationIds, activeJobId, movieHandoff,
     }
     localStorage.setItem('minimax.workspace', JSON.stringify(workspace))
-  }, [activeJobId, advanced, clothingPolicy, duration, experimentalSampling, firstFrame, lastFrame, liveEnabled, livePreviewMode, loraStrength, mode, movieHandoff, naturalMovement, noDialogue, prompt, refImageSize, referenceAudios, referenceImages, referenceVideos, resolution, rtxModel, sampler, scheduler, seed, selectedReferenceCharacterIds, selectedReferenceLocationIds, shiftAudio, shiftVideo, sigmaShiftMode, steps, textEncoderPreference, turbo, turbo8Profile, upscaleMode, userLoras])
+  }, [activeJobId, advanced, clothingPolicy, duration, experimentalSampling, firstFrame, lastFrame, liveEnabled, livePreviewMode, loraStrength, mode, movieHandoff, naturalMovement, noDialogue, prompt, refImageSize, referenceAudios, referenceImages, referenceVideos, resolution, rtxModel, sampler, scheduler, seed, seedLocked, selectedReferenceCharacterIds, selectedReferenceLocationIds, shiftAudio, shiftVideo, sigmaShiftMode, steps, textEncoderPreference, turbo, turbo8Profile, upscaleMode, userLoras])
 
   useEffect(() => {
     if (!settings || mediaHydrated.current) return
@@ -1144,11 +1195,18 @@ function App() {
     setPromptSuggestion('')
     try {
       const imagePaths = mode === 'reference' ? referenceImages.map((file) => file.path) : [firstFrame?.path, lastFrame?.path].filter(Boolean) as string[]
-      let response: string
-      if (imagePaths.length) {
-        try { response = await window.minimax.generateWithOllamaVision(llm.url, llm.model, `${request}\n\nInspect the attached pictures in reference-map order. Use visible details to make identity, wardrobe, location, composition, and continuity instructions concrete. Do not invent unseen details.`, imagePaths, llm.provider) }
-        catch { response = await window.minimax.generateWithOllama(llm.url, llm.model, request, llm.provider) }
-      } else response = await window.minimax.generateWithOllama(llm.url, llm.model, request, llm.provider)
+      const structuredRequest = `${request}\n\nReturn the required structured fields. The direction field must contain only the complete shot direction. Keep the summary to one concise sentence. Inspect attached images in reference-map order and use only visible details; do not invent unseen traits.`
+      let result: unknown
+      try {
+        result = await window.minimax.generateStructuredWithOllama(llm.url, llm.model, structuredRequest, h3PromptDirectionSchema, llm.provider, imagePaths)
+      } catch (error) {
+        if (!imagePaths.length) throw error
+        result = await window.minimax.generateStructuredWithOllama(llm.url, llm.model, `${request}\n\nImage inspection was unavailable. Use only the authoritative reference map and do not claim visual observations. Return only the required structured fields.`, h3PromptDirectionSchema, llm.provider)
+      }
+      if (!result || typeof result !== 'object') throw new Error('The local model returned a response outside the MiniMax H3 prompt format. Try again or choose another model.')
+      const payload = result as { summary?: unknown; direction?: unknown }
+      if (typeof payload.direction !== 'string') throw new Error('The local model did not return a usable MiniMax H3 shot direction. Try again or choose another model.')
+      const response = formatH3PromptOutput(payload.direction, typeof payload.summary === 'string' ? payload.summary : '', { mode, duration, noDialogue, referenceMap, request: prompt })
       const suggestionId = createId()
       setPromptSuggestion(response); setPromptSuggestionId(suggestionId)
       offerCopilotSuggestion({ id: suggestionId, title: tool === 'timeline' ? 'Review timeline rewrite' : tool === 'audio' ? 'Review sound and dialogue pass' : 'Review MiniMax-ready refinement', text: response, target: 'create-prompt', sourceLabel: `${llm.model} · ${llm.label}` })
@@ -1187,7 +1245,8 @@ function App() {
     setLivePreviewMode('standard')
     setUpscaleMode(defaults?.upscaleMode ?? workspaceDefaults.upscaleMode)
     setRtxModel('')
-    setSeed(Math.floor(Math.random() * 1_000_000_000))
+    setSeed(randomH3Seed(seed))
+    setSeedLocked(workspaceDefaults.seedLocked)
     setAdvanced(false)
     setFirstFrame(null)
     setLastFrame(null)
@@ -1230,7 +1289,7 @@ function App() {
   const captureWorkspaceProject = (scope: WorkspaceProjectScope): Record<string, unknown> => {
     if (scope === 'create') return {
       mode, prompt, duration, resolution, turbo, steps, sampler, scheduler, experimentalSampling, refImageSize, noDialogue, naturalMovement, clothingPolicy, sigmaShiftMode, shiftVideo, shiftAudio, loraStrength, userLoras,
-      seed, advanced, liveEnabled, livePreviewMode, upscaleMode, textEncoderPreference, turbo8Profile, rtxModel, firstFrame: withoutPreview(firstFrame), lastFrame: withoutPreview(lastFrame),
+      seed, seedLocked, advanced, liveEnabled, livePreviewMode, upscaleMode, textEncoderPreference, turbo8Profile, rtxModel, firstFrame: withoutPreview(firstFrame), lastFrame: withoutPreview(lastFrame),
       referenceImages: referenceImages.map((file) => withoutPreview(file)), referenceVideos: referenceVideos.map((file) => withoutPreview(file)), referenceAudios: referenceAudios.map((file) => withoutPreview(file)), selectedReferenceCharacterIds, selectedReferenceLocationIds,
     }
     const storageKey = scope === 'ltx25' ? 'ltx25.workspace' : scope === 'zimage' ? 'minimax.zimage-workspace' : 'acestep.workspace'
@@ -1251,7 +1310,7 @@ function App() {
   const loadWorkspaceProject = (project: WorkspaceProject) => {
     if (project.scope === 'create') {
       const saved = { ...workspaceDefaults, ...project.snapshot } as PersistedWorkspace
-      setMode(saved.mode); setPrompt(saved.prompt); setDuration(saved.duration); setResolution(saved.resolution); setTurbo(saved.turbo); setSteps(saved.steps); setSampler(saved.sampler); setScheduler(saved.scheduler); setExperimentalSampling(saved.experimentalSampling); setRefImageSize(saved.refImageSize); setNoDialogue(saved.noDialogue); setNaturalMovement(saved.naturalMovement); setClothingPolicy(saved.clothingPolicy); setSigmaShiftMode(saved.sigmaShiftMode); setShiftVideo(saved.shiftVideo); setShiftAudio(saved.shiftAudio); setLoraStrength(saved.loraStrength); setUserLoras(Array.isArray(saved.userLoras) ? saved.userLoras : workspaceDefaults.userLoras); setSeed(saved.seed); setAdvanced(saved.advanced); setLiveEnabled(saved.liveEnabled); setLivePreviewMode(saved.livePreviewMode); setUpscaleMode(saved.upscaleMode); setTextEncoderPreference(saved.textEncoderPreference); setTurbo8Profile(saved.turbo8Profile); setRtxModel(saved.rtxModel); setFirstFrame(saved.firstFrame); setLastFrame(saved.lastFrame); setReferenceImages(saved.referenceImages); setReferenceVideos(saved.referenceVideos); setReferenceAudios(saved.referenceAudios); setSelectedReferenceCharacterIds(saved.selectedReferenceCharacterIds); setSelectedReferenceLocationIds(saved.selectedReferenceLocationIds); setActiveJobId(null); setView('create'); setCreateResetKey((value) => value + 1)
+      setMode(saved.mode); setPrompt(saved.prompt); setDuration(saved.duration); setResolution(saved.resolution); setTurbo(saved.turbo); setSteps(saved.steps); setSampler(saved.sampler); setScheduler(saved.scheduler); setExperimentalSampling(saved.experimentalSampling); setRefImageSize(saved.refImageSize); setNoDialogue(saved.noDialogue); setNaturalMovement(saved.naturalMovement); setClothingPolicy(saved.clothingPolicy); setSigmaShiftMode(saved.sigmaShiftMode); setShiftVideo(saved.shiftVideo); setShiftAudio(saved.shiftAudio); setLoraStrength(saved.loraStrength); setUserLoras(Array.isArray(saved.userLoras) ? saved.userLoras : workspaceDefaults.userLoras); setSeed(saved.seed); setSeedLocked(saved.seedLocked); setAdvanced(saved.advanced); setLiveEnabled(saved.liveEnabled); setLivePreviewMode(saved.livePreviewMode); setUpscaleMode(saved.upscaleMode); setTextEncoderPreference(saved.textEncoderPreference); setTurbo8Profile(saved.turbo8Profile); setRtxModel(saved.rtxModel); setFirstFrame(saved.firstFrame); setLastFrame(saved.lastFrame); setReferenceImages(saved.referenceImages); setReferenceVideos(saved.referenceVideos); setReferenceAudios(saved.referenceAudios); setSelectedReferenceCharacterIds(saved.selectedReferenceCharacterIds); setSelectedReferenceLocationIds(saved.selectedReferenceLocationIds); setActiveJobId(null); setView('create'); setCreateResetKey((value) => value + 1)
     } else {
       const storageKey = project.scope === 'ltx25' ? 'ltx25.workspace' : project.scope === 'zimage' ? 'minimax.zimage-workspace' : 'acestep.workspace'
       localStorage.setItem(storageKey, JSON.stringify(project.snapshot))
@@ -1370,6 +1429,11 @@ function App() {
     }
     if (!options.prompt) {
       const message = 'Add an LTX prompt before generating.'
+      setNotice({ tone: 'error', text: message })
+      return message
+    }
+    if (!Number.isInteger(options.width) || !Number.isInteger(options.height) || options.width < 64 || options.height < 64 || options.width % 32 !== 0 || options.height % 32 !== 0) {
+      const message = 'Choose a valid LTX output size (whole numbers aligned to 32 pixels) before generating.'
       setNotice({ tone: 'error', text: message })
       return message
     }
@@ -1640,7 +1704,7 @@ function App() {
         setNotice({ tone: 'success', text: target === 'image' ? 'Reference still added to the local ComfyUI queue.' : 'Generation added to the local ComfyUI queue.' })
         if (target === 'video') setCharacterHandoff(null)
       }
-      setSeed(Math.floor(Math.random() * 1_000_000_000))
+      if (mode !== 'reference' || !seedLocked) setSeed(randomH3Seed(seed))
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       const cancelled = cancellationRequests.current.has(localId)
@@ -1725,6 +1789,12 @@ function App() {
     return <div className="boot"><LoaderCircle className="spin" /><span>Opening MiniMax Studio…</span></div>
   }
   const llmConnection = resolveLlmConnection(settings)
+  const changeCopilotModel = (model: string) => {
+    const field = llmConnection.provider === 'lmstudio' ? 'lmStudioModel' : 'ollamaModel'
+    const next = { ...settings, [field]: model }
+    setSettings(next)
+    void window.minimax.saveSettings(next).catch((error) => setNotice({ tone: 'error', text: `The model changed for this session, but could not be saved: ${error instanceof Error ? error.message : String(error)}` }))
+  }
 
   return (
     <div className={`app-shell ${sidebarOpen ? '' : 'sidebar-collapsed'}`}>
@@ -1733,17 +1803,10 @@ function App() {
         <div className="titlebar-brand"><span className="brand-mark"><Film size={18} /></span><span><strong>MiniMax Studio</strong><small>Create&nbsp;&nbsp;•&nbsp;&nbsp;Visualize&nbsp;&nbsp;•&nbsp;&nbsp;Tell Stories</small></span></div>
         <button className="titlebar-search" type="button" onClick={() => setView('library')} title="Search generated media in Library"><Search size={15} /><span>Search assets, projects, or prompts…</span><kbd>Library</kbd></button>
         <div className="titlebar-drag" />
-        {activeRenderRuntime !== undefined && <span className={`titlebar-runtime ${activeRenderJob?.status === 'running' || activeRenderJob?.status === 'queued' ? 'active' : ''}`} role="status" title="Total time since this render was queued"><Clock3 size={13} />{activeRenderJob?.status === 'queued' ? 'Queued' : activeRenderJob?.status === 'running' ? 'Rendering' : 'Render'} · {formatRuntime(activeRenderRuntime)}</span>}
-        {activeSamplerProgress && <span className="titlebar-sampler" role="status" title={`ComfyUI sampler progress: ${activeSamplerProgress.currentStep} of ${activeSamplerProgress.totalSteps}${activeSamplerProgress.rate ? `, averaging ${formatStepDuration(activeSamplerProgress.rate)}` : ''}${activeSamplerProgress.nextStepIn !== undefined ? `, approximately ${formatRuntime(activeSamplerProgress.nextStepIn)} until the next update` : ''}`}><Gauge size={13} /><strong>{activeSamplerProgress.progress}%</strong><span>{activeSamplerProgress.currentStep}/{activeSamplerProgress.totalSteps}</span>{activeSamplerProgress.rate && <span className="sampler-step-rate">{formatStepDuration(activeSamplerProgress.rate)}</span>}{activeSamplerProgress.nextStepIn !== undefined && <span>next ≈ {formatRuntime(activeSamplerProgress.nextStepIn)}</span>}</span>}
         {(view === 'create' || view === 'ltx25' || view === 'zimage') && <button className="titlebar-action titlebar-reset" onClick={resetCurrentWorkspace} title="Reset prompts, options, media, selections, and the current preview in this workspace"><RotateCcw size={14} />Reset workspace</button>}
         {workspaceProjectScope(view) && <button className="titlebar-action titlebar-projects" onClick={() => setProjectManagerOpen(true)} title="Save, open, and manage full workspace projects"><FolderOpen size={14} /><span>Project: Current workspace</span><ChevronDown size={13} /></button>}
-        <GpuMeter value={gpu} />
         <button className="titlebar-action titlebar-help" onClick={() => setHelpOpen(true)} title="Show tips for this workspace" aria-label="Show workspace tips"><HelpCircle size={15} />Tips</button>
         <button className="titlebar-action" onClick={() => { setLanOpen(true); void window.minimax.getLanStatus().then(setLanStatus) }} title="Share MiniMax Studio over your local network"><QrCode size={14} />LAN</button>
-        <button className={`connection-chip ${status.connected ? 'online' : ''}`} onClick={() => void checkConnection(settings.comfyUrl)} title="Check ComfyUI connection">
-          {checking ? <LoaderCircle size={14} className="spin" /> : <span className="status-dot" />}
-          {status.connected ? `Local engine · ${status.latencyMs} ms` : 'Engine offline'}
-        </button>
       </header>
 
       {helpOpen && <WorkspaceTips view={view} onClose={() => setHelpOpen(false)} />}
@@ -1788,6 +1851,27 @@ function App() {
         <div hidden={view !== 'create'}>
           <CreateView key={`create-${createResetKey}`}
             info={info}
+            renderIntents={settings.renderSettingsPresets}
+            onApplyIntent={(intent) => {
+              const values = intent.values
+              setResolution(values.resolution); setDuration(values.duration); setTurbo(values.turbo); setTurbo8Profile(values.turbo8Profile); setTextEncoderPreference(values.textEncoderPreference); setSteps(values.steps); setSampler(values.sampler); setScheduler(values.scheduler); setExperimentalSampling(values.experimentalSampling); setRefImageSize(values.refImageSize); setLiveEnabled(values.livePreview); setSigmaShiftMode(values.sigmaShiftMode); setShiftVideo(values.shiftVideo); setShiftAudio(values.shiftAudio); setLoraStrength(values.loraStrength); setUpscaleMode(values.upscaleMode)
+              setUserLoras(values.userLoras.map((item) => ({ ...item }))); setRtxModel(values.rtxModel); setLivePreviewMode(values.livePreviewMode); setNoDialogue(values.noDialogue); setNaturalMovement(values.naturalMovement); setClothingPolicy(values.clothingPolicy); setSeed(values.seed); setSeedLocked(values.seedLocked)
+              setNotice({ tone: 'success', text: `Intent “${intent.name}” applied to this Ref2VA workspace.` })
+            }}
+            onSaveIntent={(name, values) => {
+              const now = Date.now()
+              const existing = settings.renderSettingsPresets.find((intent) => intent.name.toLowerCase() === name.toLowerCase())
+              const intent: RenderSettingsPreset = { id: existing?.id ?? createId(), name, values, createdAt: existing?.createdAt ?? now, updatedAt: now }
+              const next = { ...settings, renderSettingsPresets: [...settings.renderSettingsPresets.filter((item) => item.id !== intent.id), intent] }
+              setSettings(next)
+              void window.minimax.saveSettings(next).catch(() => setNotice({ tone: 'error', text: 'Intent was created for this session, but could not be saved.' }))
+              setNotice({ tone: 'success', text: `Intent “${name}” saved and ready to use.` })
+            }}
+            onDeleteIntent={(intent) => {
+              const next = { ...settings, renderSettingsPresets: settings.renderSettingsPresets.filter((item) => item.id !== intent.id) }
+              setSettings(next)
+              void window.minimax.saveSettings(next).catch(() => setNotice({ tone: 'error', text: 'Intent was removed for this session, but settings could not be saved.' }))
+            }}
             sampler={sampler} setSampler={setSampler} scheduler={scheduler} setScheduler={setScheduler}
             experimentalSampling={experimentalSampling} setExperimentalSampling={setExperimentalSampling}
             refImageSize={refImageSize} setRefImageSize={setRefImageSize}
@@ -1822,6 +1906,8 @@ function App() {
             setSteps={setSteps}
             seed={seed}
             setSeed={setSeed}
+            seedLocked={seedLocked}
+            setSeedLocked={setSeedLocked}
             advanced={advanced}
             setAdvanced={setAdvanced}
             firstFrame={firstFrame}
@@ -1966,13 +2052,25 @@ function App() {
         }} />}
         {view === 'settings' && <SettingsView settings={settings} setSettings={setSettings} info={info} models={models} h3Report={h3Report} scanning={scanning} status={status} checking={checking} diagnosticRunning={diagnosticRunning} ollamaModels={ollamaModels} onRefreshOllama={() => void refreshOllama(settings)} onScan={() => void scanModels(settings)} onCheck={() => void checkConnection(settings.comfyUrl)} onSave={() => void saveAppSettings()} onApplyDefaults={applyGenerationDefaults} onRunDiagnostics={() => void runH3Diagnostics()} />}
       </main>
-      <AiChatHead available={ollamaModels.length > 0} provider={llmConnection.provider} ollamaUrl={llmConnection.url} ollamaModel={llmConnection.model} context={view === 'characters' ? characterCopilotContext : view === 'create' ? { label: `Create · ${mode} to video`, prompt, duration, noDialogue, referenceMap: mode === 'reference' ? [...referenceImages.map((file, index) => `<Picture ${index + 1}> = ${workspaceBindingsFor(selectedReferenceCharacterIds, selectedReferenceLocationIds)[index]?.label ?? file.name}`), ...referenceVideos.map((file, index) => `<Video ${index + 1}> = ${file.name}`), ...referenceAudios.map((file, index) => `<Audio ${index + 1}> = ${file.name}`)] : [], imagePaths: mode === 'reference' ? referenceImages.map((file) => file.path) : [firstFrame?.path, lastFrame?.path].filter(Boolean) as string[] } : { label: view === 'zimage' ? 'Create Image' : view.replace(/\b\w/g, (letter) => letter.toUpperCase()) }} onUseImage={(imagePrompt) => {
+      <footer className="status-bar" aria-label="Application status">
+        <span className="status-bar-context"><Film size={14} /><strong>{view === 'create' ? `Create · ${mode === 'reference' ? 'Ref2VA' : 'MiniMax H3'}` : workspaceProjectLabel(workspaceProjectScope(view) ?? 'create')}</strong></span>
+        <span className="status-bar-divider" aria-hidden="true" />
+        {activeRenderRuntime !== undefined && <span className={`status-bar-runtime ${activeRenderJob?.status === 'running' || activeRenderJob?.status === 'queued' ? 'active' : ''}`} role="status" title="Total time since this render was queued"><Clock3 size={13} />{activeRenderJob?.status === 'queued' ? 'Queued' : activeRenderJob?.status === 'running' ? 'Rendering' : 'Render'} · {formatRuntime(activeRenderRuntime)}</span>}
+        {activeSamplerProgress && <span className="status-bar-sampler" role="status" title={`ComfyUI render progress: ${activeSamplerProgress.currentStep} of ${activeSamplerProgress.totalSteps} sampler steps (${activeSamplerProgress.progress}%). ${activeSamplerProgress.remainingMs !== undefined ? `Estimated ${formatRuntime(activeSamplerProgress.remainingMs)} remaining.` : 'Remaining-time estimate will appear after another sampler step is measured.'}`}><Gauge size={13} /><strong>{activeSamplerProgress.progress}%</strong><span>{activeSamplerProgress.currentStep}/{activeSamplerProgress.totalSteps}</span>{activeSamplerProgress.rate && <span>{formatStepDuration(activeSamplerProgress.rate)}</span>}{activeSamplerProgress.remainingMs !== undefined && <span className="sampler-estimate">ETA ~{formatRuntime(activeSamplerProgress.remainingMs)}</span>}</span>}
+        <span className="status-bar-spacer" />
+        <GpuMeter value={gpu} />
+        <button className={`connection-chip ${status.connected ? 'online' : ''}`} onClick={() => void checkConnection(settings.comfyUrl)} title="Check ComfyUI connection">
+          {checking ? <LoaderCircle size={14} className="spin" /> : <span className="status-dot" />}
+          {status.connected ? `Local engine · ${status.latencyMs} ms` : 'Engine offline'}
+        </button>
+      </footer>
+      <AiChatHead available={ollamaModels.length > 0} provider={llmConnection.provider} ollamaUrl={llmConnection.url} ollamaModel={llmConnection.model} models={ollamaModels} onModelChange={changeCopilotModel} context={view === 'characters' ? characterCopilotContext : view === 'create' ? { label: `Create · ${mode} to video`, prompt, duration, noDialogue, generationMode: mode, referenceMap: mode === 'reference' ? [...referenceImages.map((file, index) => `<Picture ${index + 1}> = ${workspaceBindingsFor(selectedReferenceCharacterIds, selectedReferenceLocationIds)[index]?.label ?? file.name}`), ...referenceVideos.map((file, index) => `<Video ${index + 1}> = ${file.name}`), ...referenceAudios.map((file, index) => `<Audio ${index + 1}> = ${file.name}`)] : [], imagePaths: mode === 'reference' ? referenceImages.map((file) => file.path) : [firstFrame?.path, lastFrame?.path].filter(Boolean) as string[] } : { label: view === 'zimage' ? 'Create Image' : view.replace(/\b\w/g, (letter) => letter.toUpperCase()) }} onUseImage={(imagePrompt) => {
         setView('zimage')
         window.dispatchEvent(new CustomEvent('minimax:load-image-prompt', { detail: imagePrompt }))
         setNotice({ tone: 'success', text: 'Image prompt loaded into Create Image.' })
-      }} onUseVideo={(videoPrompt) => {
-        setPrompt((current) => appendPromptAddition(current, videoPrompt)); setActiveJobId(null); setView('create')
-        setNotice({ tone: 'success', text: 'Timeline addition appended to the current video prompt.' })
+      }} onUseVideo={(videoPrompt, operation) => {
+        setPrompt((current) => operation === 'replace' ? videoPrompt : appendPromptAddition(current, videoPrompt)); setActiveJobId(null); setView('create')
+        setNotice({ tone: 'success', text: operation === 'replace' ? 'Copilot replaced the video prompt as requested.' : 'Copilot timeline direction appended to the current video prompt.' })
       }} />
       {lanOpen && <LanCompanionDialog status={lanStatus} qr={lanQr} onRotate={async () => setLanStatus(await window.minimax.rotateLanToken())} onClose={() => setLanOpen(false)} />}
       {videoClipDraft && <VideoReferenceClipper source={videoClipDraft.source} onClose={() => setVideoClipDraft(null)} onCreate={createVideoReferenceClip} />}
@@ -2039,6 +2137,10 @@ function Notice({ tone, text, onClose }: { tone: 'error' | 'success' | 'neutral'
 
 type CreateViewProps = {
   info: ObjectInfo
+  renderIntents: RenderSettingsPreset[]
+  onApplyIntent(intent: RenderSettingsPreset): void
+  onSaveIntent(name: string, values: RenderSettingsPreset['values']): void
+  onDeleteIntent(intent: RenderSettingsPreset): void
   sampler: string; setSampler(value: string): void; scheduler: string; setScheduler(value: string): void
   experimentalSampling: boolean; setExperimentalSampling(value: boolean): void
   refImageSize: 'match' | 'max'; setRefImageSize(value: 'match' | 'max'): void
@@ -2061,7 +2163,7 @@ type CreateViewProps = {
   turbo8Profile: Turbo8Profile; setTurbo8Profile(value: Turbo8Profile): void
   textEncoderPreference: 'fast' | 'quality'; setTextEncoderPreference(value: 'fast' | 'quality'): void
   steps: number; setSteps(value: number): void
-  seed: number; setSeed(value: number): void
+  seed: number; setSeed(value: number): void; seedLocked: boolean; setSeedLocked(value: boolean): void
   advanced: boolean; setAdvanced(value: boolean): void
   firstFrame: MediaFile | null; lastFrame: MediaFile | null
   setFirstFrame(value: MediaFile | null): void; setLastFrame(value: MediaFile | null): void
@@ -2085,11 +2187,11 @@ type CreateViewProps = {
 
 function CreateView(props: CreateViewProps) {
   const {
-    info, sampler, setSampler, scheduler, setScheduler, experimentalSampling, setExperimentalSampling, refImageSize, setRefImageSize,
+    info, renderIntents, onApplyIntent, onSaveIntent, onDeleteIntent, sampler, setSampler, scheduler, setScheduler, experimentalSampling, setExperimentalSampling, refImageSize, setRefImageSize,
     sigmaShiftMode, setSigmaShiftMode, shiftVideo, setShiftVideo, shiftAudio, setShiftAudio, loraStrength, setLoraStrength, userLoras, setUserLoras, userLoraChoices, liveEnabled, setLiveEnabled, livePreviewMode, setLivePreviewMode, liveConnected, livePreview, blurNsfwPreview,
     upscaleMode, setUpscaleMode, ltxAvailable, ltxMissingNodes, noDialogue, setNoDialogue, naturalMovement, setNaturalMovement, clothingPolicy, setClothingPolicy, rtxModels, rtxModel, setRtxModel, updateReference,
     mode, setMode, prompt, setPrompt, duration, setDuration, resolution, setResolution, turbo, setTurbo, turbo8Profile, setTurbo8Profile, textEncoderPreference, setTextEncoderPreference, steps, setSteps,
-    seed, setSeed, advanced, setAdvanced, firstFrame, lastFrame, setFirstFrame, setLastFrame, chooseMedia,
+    seed, setSeed, seedLocked, setSeedLocked, advanced, setAdvanced, firstFrame, lastFrame, setFirstFrame, setLastFrame, chooseMedia,
     referenceImages, referenceVideos, referenceAudios, characters, wardrobes, locations, selectedCharacterIds, selectedLocationIds, characterDetailReferencesEnabled, loadCharacter, loadWardrobe, loadLocation, refreshSourceMedia, removeReference, chooseReference, editVideoReference, h3Validated, modelReady, selection,
     submitting, stillSubmitting, cancelling, connected, ollamaAvailable, ollamaModel, llmProviderLabel, promptSuggestion, promptingTool, dialogueGenerating,
     onPromptTool, onGenerateDialogue, onUseSuggestion, onDismissSuggestion, onGenerate, onGenerateImage, onSendStillToI2v, onCancel, onContinue, latestJob,
@@ -2101,6 +2203,8 @@ function CreateView(props: CreateViewProps) {
   const [sourceMediaOpen, setSourceMediaOpen] = useState(false)
   const [automaticPromptOpen, setAutomaticPromptOpen] = useState(false)
   const [dialogueOpen, setDialogueOpen] = useState(false)
+  const [intentBuilderOpen, setIntentBuilderOpen] = useState(false)
+  const [activeIntentId, setActiveIntentId] = useState('')
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle')
   const h3PreviewOverrideAvailable = Boolean(findH3PreviewOverrideNode(info))
   const selectedCharacters = selectedCharacterIds.map((id) => characters.find((character) => character.id === id)).filter(Boolean) as CharacterProject[]
@@ -2170,6 +2274,12 @@ function CreateView(props: CreateViewProps) {
     setSteps(preset === 'quality' ? 30 : 8); setSampler('res_multistep'); setScheduler('simple'); setExperimentalSampling(false)
     setSigmaShiftMode('model'); setShiftVideo(12); setShiftAudio(3); setLoraStrength(1); setUpscaleMode('off')
   }
+  const currentIntentValues: RenderSettingsPreset['values'] = { resolution, duration, turbo, steps, sampler, scheduler, experimentalSampling, refImageSize, livePreview: liveEnabled, sigmaShiftMode, shiftVideo, shiftAudio, loraStrength, upscaleMode, textEncoderPreference, turbo8Profile, userLoras: userLoras.map((item) => ({ ...item })), rtxModel, livePreviewMode, noDialogue, naturalMovement, clothingPolicy, seed, seedLocked }
+  const selectIntent = (id: string) => {
+    setActiveIntentId(id)
+    const intent = renderIntents.find((item) => item.id === id)
+    if (intent) onApplyIntent(intent)
+  }
   const setUserLoraSlot = (index: number, patch: Partial<{ name: string; strength: number }>) => setUserLoras(userLoras.map((slot, slotIndex) => slotIndex === index ? { ...slot, ...patch } : slot))
   return (
     <div className="create-page minimax-workspace">
@@ -2177,6 +2287,11 @@ function CreateView(props: CreateViewProps) {
         <div><p className="eyebrow">CREATE · MINIMAX H3</p><h1>Video Creation</h1><p>Generate cinematic video with references, reusable assets, and focused production controls.</p></div>
         <div className="heading-actions"><div className="heading-model-card"><span><small>MODEL</small><strong>MiniMax H3</strong><em>{modeInfo.find((item) => item.id === mode)?.note ?? 'Video generation'}</em></span><Film size={22} /></div><div className="heading-state"><span className={modelReady && h3Validated ? 'ok' : 'warn'}>{modelReady && h3Validated ? <Check size={15} /> : <AlertCircle size={15} />}{!modelReady ? 'Check model paths' : h3Validated ? 'Validated H3 stack' : 'Custom H3 stack'}</span></div></div>
       </div>
+
+      {mode === 'reference' && <section className="ref2va-intent-bar" aria-labelledby="ref2va-intent-label">
+        <div><span className="ref2va-intent-icon"><Sparkles size={16} /></span><span><strong id="ref2va-intent-label">Intent</strong><small>Apply a named Ref2VA render setup to this workspace.</small></span></div>
+        <div className="ref2va-intent-actions"><label><span className="sr-only">Ref2VA intent</span><select value={activeIntentId} onChange={(event) => selectIntent(event.target.value)}><option value="">Choose an intent…</option>{renderIntents.map((intent) => <option key={intent.id} value={intent.id}>{intent.name}</option>)}</select></label><button type="button" className="secondary-button" onClick={() => setIntentBuilderOpen(true)}><SlidersHorizontal size={15} />Build intents</button></div>
+      </section>}
 
       <nav className="workspace-stage-nav" aria-label="Create workspace sections">
         <span>WORKFLOW</span>
@@ -2244,6 +2359,11 @@ function CreateView(props: CreateViewProps) {
           </div>
           </section>
 
+          <section className="create-section advanced-workspace-section" aria-labelledby="advanced-controls-title">
+            <button className="advanced-toggle" onClick={() => setAdvanced(!advanced)} aria-expanded={advanced} aria-controls="advanced-controls-panel"><SlidersHorizontal size={16} /><span><strong id="advanced-controls-title">Advanced controls</strong><small>Encoder, fixed-seed testing, Turbo overrides, and custom sampling.</small></span><ChevronDown size={15} className={advanced ? 'rotated' : ''} /></button>
+            {advanced && <div id="advanced-controls-panel" className="advanced-grid"><SelectField label="Text encoder" value={textEncoderPreference} onChange={(value) => setTextEncoderPreference(value as 'fast' | 'quality')} options={[["fast", 'Fast · NVFP4-AWQ · 15.7 GB'], ["quality", 'Slower · better encoding · INT8 ConvRot · 27.1 GB']]} /><p className="field-help">The slower quality option requires <strong>qwen3vl_32b_minimax_h3_int8_convrot.safetensors</strong> in Text encoders. It is never selected unless you choose it.</p><NumberField label="Full-quality steps" value={steps} min={16} max={30} onChange={setSteps} disabled={turbo !== 'off'} /><NumberField label="Seed" value={seed} min={0} max={999999999999} onChange={setSeed} disabled={mode === 'reference' && seedLocked} /><div className="turbo-lora-weight"><NumberField label="Official Turbo LoRA weight" value={loraStrength} min={0} max={2} step={0.05} onChange={setLoraStrength} disabled={turbo === 'off'} /><small>Controls the automatic official Turbo adapter only. It does not change the Additional ComfyUI LoRAs above.</small></div><label className="sampling-opt-in"><input type="checkbox" checked={experimentalSampling} onChange={(event) => setExperimentalSampling(event.target.checked)} />Use custom sampler and scheduler</label><SelectField label="Experimental Turbo override" value={turbo} onChange={(value) => setTurbo(value as 'off' | '4' | '8')} options={[["off", 'Off · native quality'], ["8", 'Official 8-step'], ["4", '4-step · preview testing']]} /><SelectField label="Sampler" value={experimentalSampling ? sampler : turbo === '8' && turbo8Profile === 'stable' ? 'euler' : 'res_multistep'} onChange={setSampler} disabled={!experimentalSampling} options={[...new Set([sampler, 'euler', 'res_multistep', ...choices(info, 'KSamplerSelect', 'sampler_name')])].map((value) => [value, value])} /><SelectField label="Scheduler" value={experimentalSampling ? scheduler : turbo === '8' && turbo8Profile === 'motion' ? 'beta' : 'simple'} onChange={setScheduler} disabled={!experimentalSampling} options={[...new Set([scheduler, 'simple', 'beta', ...choices(info, 'BasicScheduler', 'scheduler')])].map((value) => [value, value])} /><SelectField label="Sigma shifts" value={sigmaShiftMode} onChange={(value) => setSigmaShiftMode(value as 'model' | 'custom')} options={[["model", 'Model defaults · video 12 / audio 3'], ["custom", 'Custom sigma-shift node']]} /><NumberField label="Video sigma shift" value={shiftVideo} min={0.01} max={100} step={0.01} onChange={setShiftVideo} disabled={sigmaShiftMode !== 'custom'} /><NumberField label="Audio sigma shift" value={shiftAudio} min={0.01} max={100} step={0.01} onChange={setShiftAudio} disabled={sigmaShiftMode !== 'custom'} /><p className="field-help advanced-sampling-note">Choose Custom sigma-shift node to tune the video and audio shifts for any Turbo profile. Turbo 8 profiles execute as shown: Stable uses Euler + Simple for faces and dialogue; Balanced uses res_multistep + Simple; Motion uses res_multistep + Beta. Full quality retains <strong>res_multistep + simple</strong>, CFG 1, denoise 1, and native shifts. Other sampler combinations remain experimental and should be compared at a fixed seed.</p></div>}
+          </section>
+
           {(mode === 'image' || mode === 'frames') && <section id="workspace-sources" className="create-section create-input-section">
             <div className="create-section-heading"><span><ImageIcon size={15} /></span><div><strong>Source media</strong><small>{mode === 'frames' ? 'Set the opening and closing composition.' : 'Choose the frame this shot begins from.'}</small></div><em className={firstFrame && (mode !== 'frames' || lastFrame) ? 'complete' : ''}>{mode === 'frames' ? `${Number(Boolean(firstFrame)) + Number(Boolean(lastFrame))} of 2` : firstFrame ? 'Ready' : 'Required'}</em></div>
           {(mode === 'image' || mode === 'frames') && (
@@ -2255,6 +2375,8 @@ function CreateView(props: CreateViewProps) {
           </section>}
 
           {automaticPromptOpen && mode === 'reference' && <AutomaticReferenceModal bindings={activeSelectedBindings} detailInstructions={detailReferenceDirection} onClose={() => setAutomaticPromptOpen(false)} onManage={() => { setAutomaticPromptOpen(false); void refreshSourceMedia().then(() => setSourceMediaOpen(true)) }} />}
+
+          {intentBuilderOpen && mode === 'reference' && <Ref2vaIntentBuilder intents={renderIntents} values={currentIntentValues} onApply={(intent) => { setActiveIntentId(intent.id); onApplyIntent(intent); setIntentBuilderOpen(false) }} onSave={onSaveIntent} onDelete={onDeleteIntent} onClose={() => setIntentBuilderOpen(false)} />}
 
           {sourceMediaOpen && mode === 'reference' && (
             <div className="modal-backdrop source-media-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) closeSourceMedia() }}>
@@ -2307,13 +2429,21 @@ function CreateView(props: CreateViewProps) {
             <RenderSize value={resolution} onChange={setResolution} />
             {mode === 'reference' && <details className="output-reference-fidelity"><summary><Gauge size={16} /><span><small>REFERENCE FIDELITY</small><strong>{refImageSize === 'max' ? 'Maximum identity' : 'Balanced'}</strong><em>{refImageSize === 'max' ? 'Keep more original source detail' : 'Fit references to the output canvas'}</em></span><ChevronDown size={15} /></summary><fieldset><legend>Choose how much source-image detail H3 preserves</legend><label className={refImageSize === 'match' ? 'selected' : ''}><input type="radio" name="output-reference-fidelity" checked={refImageSize === 'match'} onChange={() => setRefImageSize('match')} /><span><strong>Balanced</strong><small>Fit references to the output canvas. Faster and uses less memory.</small></span></label><label className={refImageSize === 'max' ? 'selected' : ''}><input type="radio" name="output-reference-fidelity" checked={refImageSize === 'max'} onChange={() => setRefImageSize('max')} /><span><strong>Maximum identity</strong><small>Keep more original image detail. Slower and uses more memory.</small></span></label></fieldset></details>}
             <section className="ref2va-setting-group" aria-labelledby="render-plan-title"><div className="ref2va-setting-heading"><span>01</span><div><strong id="render-plan-title">Render plan</strong><small>Set timing and the primary H3 sampling recipe.</small></div></div><div className="render-controls"><div className="field-group"><label htmlFor="duration">Duration</label><div className="range-line"><input id="duration" type="range" min="2" max="15" step="0.5" value={duration} onChange={(event) => setDuration(Number(event.target.value))} /><output>{duration}s</output></div></div><SelectField label="Sampling quality" value={turbo === '4' && mode !== 'reference' ? '8' : turbo} onChange={(value) => setTurbo(value as 'off' | '4' | '8')} options={mode === 'reference' ? [["off", 'Native quality · 30 steps'], ["8", 'Turbo 8 · Ref2VA v1.0 · 768p'], ["4", 'Turbo 4 · Ref2VA v0.1']] : [["off", 'Native quality · 30 steps'], ["8", 'Official Turbo 8']]} /></div>
+            {mode === 'reference' && <div className="ref2va-seed-control">
+              <div className="field-group"><label htmlFor="h3-ref2va-seed">Ref2VA seed</label><input id="h3-ref2va-seed" className="number-input" type="number" min={0} max={999999999999} step={1} value={seed} disabled={seedLocked || submitting || stillSubmitting} onChange={(event) => setSeed(Math.max(0, Math.min(999999999999, Math.floor(Number(event.target.value) || 0))))} /></div>
+              <div className="ref2va-seed-actions">
+                <button type="button" className="seed-step-button" aria-label="Decrease Ref2VA seed by one" title="Use the previous seed value" disabled={seed <= 0 || submitting || stillSubmitting} onClick={() => setSeed(seed - 1)}>−1</button>
+                <button type="button" className="seed-step-button" aria-label="Increase Ref2VA seed by one" title="Use the next seed value" disabled={seed >= 999999999999 || submitting || stillSubmitting} onClick={() => setSeed(seed + 1)}>+1</button>
+                <button type="button" className="secondary-button" aria-pressed={seedLocked} aria-label={seedLocked ? 'Unlock Ref2VA seed' : 'Lock Ref2VA seed'} title={seedLocked ? 'Unlock to type or randomize this seed. The −1 and +1 buttons remain available.' : 'Keep this seed for every Ref2VA render'} disabled={submitting || stillSubmitting} onClick={() => setSeedLocked(!seedLocked)}><LockKeyhole size={15} />{seedLocked ? 'Locked' : 'Unlocked'}</button>
+                <button type="button" className="secondary-button" aria-label="Randomize Ref2VA seed" title={seedLocked ? 'Unlock the seed before randomizing' : 'Choose a different random seed'} disabled={seedLocked || submitting || stillSubmitting} onClick={() => setSeed(randomH3Seed(seed))}><Dices size={15} />Randomize</button>
+              </div>
+              <p className="field-help">{seedLocked ? 'Locked: this seed stays fixed across Ref2VA submissions. Use −1 or +1 for a deliberate one-step variation; unlock to type or randomize.' : 'Unlocked: this seed changes after each successful Ref2VA submission. Lock it to reuse the same result settings.'}</p>
+            </div>}
             <p className="field-help">Sampling quality changes only the selected sampler profile. Your resolution, duration, steps, reference fidelity, preview, advanced sampling, LoRAs, and upscale choices stay exactly as you set them. Use a named preset or Reset only when you want to replace a group of settings.</p>
             {turbo === '8' && <><SelectField label="Turbo 8 profile" value={turbo8Profile} onChange={(value) => setTurbo8Profile(value as Turbo8Profile)} options={[["stable", 'Stable · Euler + Simple · faces/dialogue'], ["balanced", 'Balanced · res_multistep + Simple'], ["motion", 'Motion · res_multistep + Beta']]}/><NumberField label="Turbo 8 steps" value={steps} min={4} max={12} onChange={setSteps} /><p className="field-help">8 is the trained default. Use 9–10 steps when you want to test for a small coherence or detail gain; values are capped at 12 to keep the Turbo recipe practical.</p></>}
             </section>
             <section className="ref2va-setting-group ref2va-adapter-group" aria-labelledby="user-lora-title"><div className="ref2va-setting-heading"><span>02</span><div><strong>Adapters</strong><small>Add compatible ComfyUI LoRAs after the selected H3 recipe.</small></div></div><section className="user-lora-slots"><div><span><strong id="user-lora-title">Additional ComfyUI LoRAs</strong><small>Apply up to three adapters from your configured LoRAs folder.</small></span><em>{userLoras.filter((slot) => slot.name).length}/3 selected</em></div>{userLoras.map((slot, index) => <div className="user-lora-slot" key={index}><label>LoRA {index + 1}<select value={slot.name} disabled={!userLoraChoices.length} onChange={(event) => setUserLoraSlot(index, { name: event.target.value })}><option value="">No additional LoRA</option>{userLoraChoices.filter((name) => name === slot.name || !userLoras.some((other, otherIndex) => otherIndex !== index && other.name === name)).map((name) => <option key={name} value={name}>{name}</option>)}</select></label><NumberField label="Strength" value={slot.strength} min={0} max={2} step={0.05} disabled={!slot.name} onChange={(strength) => setUserLoraSlot(index, { strength })} /></div>)}<p className="field-help">Official H3 Turbo LoRAs stay automatic and do not consume these slots. Additional adapters are loaded after Turbo; use short fixed-seed tests because unsupported model adapters can reduce stability.</p>{!userLoraChoices.length && <p className="field-help">No extra LoRAs were found. Add compatible files to the configured ComfyUI LoRAs folder, then rescan in Settings.</p>}</section></section>
             <section className="ref2va-setting-group" aria-labelledby="preview-finish-title"><div className="ref2va-setting-heading"><span>03</span><div><strong id="preview-finish-title">Preview and finish</strong><small>Choose what to watch while sampling and what happens after rendering.</small></div></div><div className="render-extras"><div className="ref2va-subsection-title">During the render</div><label><input type="checkbox" checked={liveEnabled} onChange={(event) => setLiveEnabled(event.target.checked)} />Live preview <small>{liveEnabled ? liveConnected ? 'Connected · waiting for preview frames' : 'Connecting to ComfyUI…' : 'Off'}</small></label><label className="live-preview-mode"><span>Preview source</span><select value={livePreviewMode} disabled={!liveEnabled} onChange={(event) => setLivePreviewMode(event.target.value as 'standard' | 'h3-override')}><option value="standard">Standard first frame</option><option value="h3-override">MiniMax H3 animated · 50 frames at 12 fps</option></select></label><p className={`field-help ${livePreviewMode === 'h3-override' && !h3PreviewOverrideAvailable ? 'upscale-warning' : ''}`}>{livePreviewMode === 'h3-override' && h3PreviewOverrideAvailable ? 'The installed MiniMax H3 Preview Override node is wired between the model and sampler and streams a 50-frame, 12 fps animated preview.' : livePreviewMode === 'h3-override' ? 'Animated preview is selected, but the required Preview Override node is not detected. Install or enable it, restart ComfyUI, then click the Local engine status to refresh before generating.' : h3PreviewOverrideAvailable ? 'MiniMax H3 Preview Override is installed. Select the animated option to preview motion while sampling.' : 'You can select animated preview now. Generation will wait until the MiniMax H3 Preview Override custom node is installed and detected.'}</p><div className="ref2va-subsection-title after-render">After the render</div><div className="upscale-options" role="group" aria-labelledby="upscale-label"><span id="upscale-label">Post-render upscale</span><label><input type="radio" name="upscale" checked={upscaleMode === 'off'} onChange={() => setUpscaleMode('off')} />Off</label><label><input type="radio" name="upscale" checked={upscaleMode === 'ltx'} disabled={!ltxAvailable} onChange={() => setUpscaleMode('ltx')} />LTX 2.5 latent · 2×</label><label><input type="radio" name="upscale" checked={upscaleMode === 'rtx'} disabled={rtxModels.length === 0} onChange={() => setUpscaleMode('rtx')} />RTX / CUDA frames · 2× · experimental</label></div>{upscaleMode === 'rtx' && <SelectField label="AI upscale model" value={rtxModel} onChange={setRtxModel} options={rtxModels.map((name) => [name, name])} />}<p className={`field-help ${upscaleMode === 'rtx' ? 'upscale-warning' : ''}`}>{upscaleMode === 'ltx' ? `Verified latent pipeline: MiniMax frames are encoded with the LTX‑2.5 video VAE, spatially upsampled exactly 2× in latent space, decoded, trimmed to the original duration, and joined to the untouched MiniMax audio. Final size: ${resolution.split('x').map((value) => Number(value) * 2).join(' × ')}.` : upscaleMode === 'rtx' ? `Experimental frame-by-frame upscale using ${rtxModel || 'the selected model'}. It does not understand motion and can amplify noise, flicker, or temporal shimmer. Diagnose output quality with upscale Off first.` : !ltxAvailable && ltxMissingNodes.length ? `LTX 2× is unavailable until ComfyUI provides: ${ltxMissingNodes.join(', ')}.` : !ltxAvailable && rtxModels.length === 0 ? 'No compatible upscale models were reported by ComfyUI.' : 'The original MiniMax video is saved without post-processing.'}</p></div></section>
-            <button className="advanced-toggle" onClick={() => setAdvanced(!advanced)} aria-expanded={advanced}><SlidersHorizontal size={16} />Advanced controls<ChevronDown size={15} className={advanced ? 'rotated' : ''} /></button>
-            {advanced && <div className="advanced-grid"><SelectField label="Text encoder" value={textEncoderPreference} onChange={(value) => setTextEncoderPreference(value as 'fast' | 'quality')} options={[["fast", 'Fast · NVFP4-AWQ · 15.7 GB'], ["quality", 'Slower · better encoding · INT8 ConvRot · 27.1 GB']]} /><p className="field-help">The slower quality option requires <strong>qwen3vl_32b_minimax_h3_int8_convrot.safetensors</strong> in Text encoders. It is never selected unless you choose it.</p><NumberField label="Full-quality steps" value={steps} min={16} max={30} onChange={setSteps} disabled={turbo !== 'off'} /><NumberField label="Seed" value={seed} min={0} max={999999999999} onChange={setSeed} /><div className="turbo-lora-weight"><NumberField label="Official Turbo LoRA weight" value={loraStrength} min={0} max={2} step={0.05} onChange={setLoraStrength} disabled={turbo === 'off'} /><small>Controls the automatic official Turbo adapter only. It does not change the Additional ComfyUI LoRAs above.</small></div><label className="sampling-opt-in"><input type="checkbox" checked={experimentalSampling} onChange={(event) => setExperimentalSampling(event.target.checked)} />Use custom sampler and scheduler</label><SelectField label="Experimental Turbo override" value={turbo} onChange={(value) => setTurbo(value as 'off' | '4' | '8')} options={[["off", 'Off · native quality'], ["8", 'Official 8-step'], ["4", '4-step · preview testing']]} /><SelectField label="Sampler" value={experimentalSampling ? sampler : turbo === '8' && turbo8Profile === 'stable' ? 'euler' : 'res_multistep'} onChange={setSampler} disabled={!experimentalSampling} options={[...new Set([sampler, 'euler', 'res_multistep', ...choices(info, 'KSamplerSelect', 'sampler_name')])].map((value) => [value, value])} /><SelectField label="Scheduler" value={experimentalSampling ? scheduler : turbo === '8' && turbo8Profile === 'motion' ? 'beta' : 'simple'} onChange={setScheduler} disabled={!experimentalSampling} options={[...new Set([scheduler, 'simple', 'beta', ...choices(info, 'BasicScheduler', 'scheduler')])].map((value) => [value, value])} /><SelectField label="Sigma shifts" value={sigmaShiftMode} onChange={(value) => setSigmaShiftMode(value as 'model' | 'custom')} options={[["model", 'Model defaults · video 12 / audio 3'], ["custom", 'Custom sigma-shift node']]} /><NumberField label="Video sigma shift" value={shiftVideo} min={0.01} max={100} step={0.01} onChange={setShiftVideo} disabled={sigmaShiftMode !== 'custom'} /><NumberField label="Audio sigma shift" value={shiftAudio} min={0.01} max={100} step={0.01} onChange={setShiftAudio} disabled={sigmaShiftMode !== 'custom'} /><p className="field-help">Choose Custom sigma-shift node to tune the video and audio shifts for any Turbo profile. Turbo 8 profiles execute as shown: Stable uses Euler + Simple for faces and dialogue; Balanced uses res_multistep + Simple; Motion uses res_multistep + Beta. Full quality retains <strong>res_multistep + simple</strong>, CFG 1, denoise 1, and native shifts. Other sampler combinations remain experimental and should be compared at a fixed seed.</p></div>}
             <p className="field-help render-duration">{frameCount(duration)} frames · {(frameCount(duration) / 24).toFixed(2)}s actual duration at 24 fps. Rounded up to MiniMax’s frame grid.</p>
           </section>
           <div className="generate-bar preview-generate-bar"><div className="generation-summary"><Gauge size={17} /><span><strong>{resolution.replace('x', ' × ')}</strong><small>{duration}s · 24 fps · {turbo === 'off' ? `${steps} steps` : `${turbo}-step turbo`}</small></span></div><div className="generate-actions">{latestJob && ['queued', 'running'].includes(latestJob.status) && <button className="danger-button" onClick={() => onCancel(latestJob)} disabled={cancelling}><CircleStop size={16} />{cancelling ? 'Stopping…' : latestJob.mediaType === 'image' ? 'Cancel image' : 'Cancel generation'}</button>}<button className="primary-button generation-button" onClick={onGenerate} disabled={submitting || !connected || !modelReady}>{submitting ? <LoaderCircle size={18} className="spin" /> : <Play size={18} fill="currentColor" />}{submitting ? 'Submitting…' : 'Generate video'}</button>{mode === 'reference' && <button className="secondary-button generation-image-button" onClick={onGenerateImage} disabled={stillSubmitting || !connected || !modelReady}>{stillSubmitting ? <LoaderCircle size={16} className="spin" /> : <ImagePlus size={16} />}{stillSubmitting ? 'Generating image…' : 'Generate image'}</button>}</div></div>
@@ -2381,6 +2511,29 @@ function AutomaticReferenceModal({ bindings, detailInstructions, onClose, onMana
       <header><span><LockKeyhole size={18} /><span><strong id="automatic-reference-modal-title">Reference instructions</strong><small>These are generated from your approved source assignments and are protected from accidental edits in the scene prompt.</small></span></span><button className="icon-button" autoFocus onClick={onClose} aria-label="Close reference instructions"><X size={18} /></button></header>
       <div className="automatic-reference-modal-body">{instructions.length ? instructions.map((instruction, index) => <article key={`${instruction}-${index}`}><span>{index + 1}</span><p>{instruction}</p></article>) : <div className="automatic-reference-modal-empty"><ImageIcon size={24} /><strong>No reference instructions yet</strong><span>Add a character, wardrobe, location, or standalone reference to build this protected section.</span></div>}</div>
       <footer><span><LockKeyhole size={14} />Edit the source assignments—not the generated prompt—to keep picture tags and render inputs synchronized.</span><div><button className="secondary-button" onClick={onClose}>Done</button><button className="primary-button" onClick={onManage}><SlidersHorizontal size={14} />Manage sources</button></div></footer>
+    </section>
+  </div>
+}
+
+function Ref2vaIntentBuilder({ intents, values, onApply, onSave, onDelete, onClose }: { intents: RenderSettingsPreset[]; values: RenderSettingsPreset['values']; onApply(intent: RenderSettingsPreset): void; onSave(name: string, values: RenderSettingsPreset['values']): void; onDelete(intent: RenderSettingsPreset): void; onClose(): void }) {
+  const [name, setName] = useState('')
+  const [snapshot, setSnapshot] = useState<RenderSettingsPreset['values'] | null>(null)
+  const closeRef = useRef<HTMLButtonElement>(null)
+  useEffect(() => { window.requestAnimationFrame(() => closeRef.current?.focus()) }, [])
+  const snapshotValues = snapshot ?? values
+  const summary = `${snapshotValues.resolution.replace('x', ' × ')} · ${snapshotValues.duration}s · ${snapshotValues.turbo === 'off' ? `${snapshotValues.steps} steps` : `Turbo ${snapshotValues.turbo} · ${snapshotValues.steps} steps`}`
+  return <div className="modal-backdrop intent-builder-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
+    <section className="intent-builder-modal" role="dialog" aria-modal="true" aria-labelledby="intent-builder-title" onKeyDown={(event) => { if (event.key === 'Escape') onClose() }}>
+      <header><span><Sparkles size={18} /><span><strong id="intent-builder-title">Ref2VA intent builder</strong><small>Save the current render setup as a reusable intent. Prompts and reference media stay untouched.</small></span></span><button ref={closeRef} type="button" className="icon-button" onClick={onClose} aria-label="Close intent builder"><X size={18} /></button></header>
+      <div className="intent-builder-body">
+        {!snapshot ? <section className="intent-snapshot-card"><div><span><strong>Current Ref2VA setup</strong><small>{summary}</small></span><span>{values.turbo8Profile} profile</span></div><button className="primary-button" type="button" onClick={() => setSnapshot({ ...values })}><Save size={15} />Snapshot intent</button></section> : <form onSubmit={(event) => { event.preventDefault(); const trimmed = name.trim(); if (!trimmed) return; onSave(trimmed.slice(0, 60), snapshot); setName(''); onClose() }}>
+          <div className="intent-current-values"><span><strong>Snapshot captured</strong><small>{summary}</small></span><span>{snapshotValues.turbo8Profile} profile</span></div>
+          <label><span>Name this intent</span><input autoFocus value={name} maxLength={60} onChange={(event) => setName(event.target.value)} placeholder="e.g. Dialogue close-up or Face detail" /></label>
+          <div className="intent-snapshot-actions"><button className="secondary-button" type="button" onClick={() => setSnapshot(null)}>Retake</button><button className="primary-button" type="submit" disabled={!name.trim()}><Save size={15} />Save intent</button></div>
+        </form>}
+        <section className="intent-library" aria-labelledby="intent-library-title"><div><strong id="intent-library-title">Saved intents</strong><small>{intents.length ? 'Choose one to replace this workspace’s render settings.' : 'Save your first intent above, then select it directly from Ref2VA.'}</small></div>{intents.length > 0 && <div>{intents.map((intent) => <article key={intent.id}><span><strong>{intent.name}</strong><small>{intent.values.resolution.replace('x', ' × ')} · {intent.values.duration}s · {intent.values.turbo === 'off' ? `${intent.values.steps} steps` : `Turbo ${intent.values.turbo} · ${intent.values.steps} steps`}</small></span><span><button type="button" className="secondary-button" onClick={() => onApply(intent)}>Apply</button><button type="button" className="icon-button" onClick={() => { if (window.confirm(`Delete intent “${intent.name}”?`)) onDelete(intent) }} aria-label={`Delete intent ${intent.name}`}><Trash2 size={15} /></button></span></article>)}</div>}</section>
+      </div>
+      <footer><span>Intents apply resolution, duration, quality, sampling, fidelity, preview, and finish settings only.</span><button type="button" className="secondary-button" onClick={onClose}>Done</button></footer>
     </section>
   </div>
 }
@@ -2611,7 +2764,7 @@ function SettingsView({ settings, setSettings, info, models, h3Report, scanning,
     if (!name) return
     const now = Date.now()
     const existing = settings.renderSettingsPresets.find((preset) => preset.name.toLowerCase() === name.toLowerCase())
-    const preset: RenderSettingsPreset = { id: existing?.id ?? createId(), name, values: { ...defaults }, createdAt: existing?.createdAt ?? now, updatedAt: now }
+    const preset: RenderSettingsPreset = { id: existing?.id ?? createId(), name, values: { ...defaults, userLoras: [], rtxModel: '', livePreviewMode: 'standard', noDialogue: true, naturalMovement: true, clothingPolicy: 'wardrobe', seed: 0, seedLocked: true }, createdAt: existing?.createdAt ?? now, updatedAt: now }
     setSettings({ ...settings, renderSettingsPresets: [...settings.renderSettingsPresets.filter((item) => item.id !== preset.id), preset] })
     setPresetName('')
   }
@@ -2694,7 +2847,7 @@ function SettingsView({ settings, setSettings, info, models, h3Report, scanning,
         <button type="button" onClick={() => applyPreset('official-turbo')}><strong>Turbo 8</strong><small>Native canvas · official LoRA 1.0</small></button>
         <button type="button" onClick={() => applyPreset('preview')}><strong>Preview</strong><small>864 × 480 · official Turbo 8</small></button>
       </div>
-      <div className="render-preset-manager" aria-labelledby="render-preset-manager-title"><div><span><Save size={15} /><span><strong id="render-preset-manager-title">Saved render presets</strong><small>Save resolution, duration, Turbo profile, steps, fidelity, sampling, shifts, and upscale settings. Prompts and source media are never included.</small></span></span><span>{settings.renderSettingsPresets.length} saved</span></div><form onSubmit={(event) => { event.preventDefault(); saveRenderPreset() }}><label><span>Save current defaults as</span><input value={presetName} maxLength={60} onChange={(event) => setPresetName(event.target.value)} placeholder="e.g. Dialogue close-up" /></label><button className="secondary-button" type="submit" disabled={!presetName.trim()}><Plus size={14} />Save preset</button></form>{settings.renderSettingsPresets.length > 0 && <div className="render-preset-list">{settings.renderSettingsPresets.map((preset) => <article key={preset.id}><span><strong>{preset.name}</strong><small>{preset.values.resolution.replace('x', ' × ')} · {preset.values.duration}s · {preset.values.turbo === 'off' ? `${preset.values.steps} steps` : `Turbo ${preset.values.turbo} · ${preset.values.turbo === '8' ? `${preset.values.steps} steps · ${preset.values.turbo8Profile}` : '4 steps'}`}</small></span><div><button type="button" className="secondary-button" onClick={() => applyRenderPreset(preset)}>Load</button><button type="button" className="icon-button" onClick={() => renameRenderPreset(preset)} aria-label={`Rename ${preset.name}`}><Pencil size={14} /></button><button type="button" className="icon-button" onClick={() => deleteRenderPreset(preset)} aria-label={`Delete ${preset.name}`}><Trash2 size={14} /></button></div></article>)}</div>}</div>
+      <div className="render-preset-manager" aria-labelledby="render-preset-manager-title"><div><span><Save size={15} /><span><strong id="render-preset-manager-title">Saved Ref2VA intents</strong><small>Intents save resolution, duration, Turbo profile, steps, fidelity, sampling, shifts, and upscale settings. Prompts and source media are never included.</small></span></span><span>{settings.renderSettingsPresets.length} saved</span></div><form onSubmit={(event) => { event.preventDefault(); saveRenderPreset() }}><label><span>Save current defaults as an intent</span><input value={presetName} maxLength={60} onChange={(event) => setPresetName(event.target.value)} placeholder="e.g. Dialogue close-up" /></label><button className="secondary-button" type="submit" disabled={!presetName.trim()}><Plus size={14} />Save intent</button></form>{settings.renderSettingsPresets.length > 0 && <div className="render-preset-list">{settings.renderSettingsPresets.map((preset) => <article key={preset.id}><span><strong>{preset.name}</strong><small>{preset.values.resolution.replace('x', ' × ')} · {preset.values.duration}s · {preset.values.turbo === 'off' ? `${preset.values.steps} steps` : `Turbo ${preset.values.turbo} · ${preset.values.turbo === '8' ? `${preset.values.steps} steps · ${preset.values.turbo8Profile}` : '4 steps'}`}</small></span><div><button type="button" className="secondary-button" onClick={() => applyRenderPreset(preset)}>Load</button><button type="button" className="icon-button" onClick={() => renameRenderPreset(preset)} aria-label={`Rename ${preset.name}`}><Pencil size={14} /></button><button type="button" className="icon-button" onClick={() => deleteRenderPreset(preset)} aria-label={`Delete ${preset.name}`}><Trash2 size={14} /></button></div></article>)}</div>}</div>
       <div className="generation-defaults-grid">
         <SelectField label="Default resolution" value={defaults.resolution} onChange={(resolution) => updateDefaults({ resolution })} options={['608x352', '864x480', '1056x608', '1344x768', '768x1344', '768x768'].map((value) => [value, value.replace('x', ' × ')])} />
         <NumberField label="Default duration (seconds)" value={defaults.duration} min={2} max={15} step={0.5} onChange={(duration) => updateDefaults({ duration })} />

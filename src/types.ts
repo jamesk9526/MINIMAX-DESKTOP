@@ -31,7 +31,18 @@ export type GenerationDefaults = {
   turbo8Profile: Turbo8Profile
 }
 
-export type RenderSettingsPreset = { id: string; name: string; values: GenerationDefaults; createdAt: number; updatedAt: number }
+export type RenderIntentValues = GenerationDefaults & {
+  userLoras: AppliedLora[]
+  rtxModel: string
+  livePreviewMode: 'standard' | 'h3-override'
+  noDialogue: boolean
+  naturalMovement: boolean
+  clothingPolicy: 'wardrobe' | 'underwear' | 'unrestricted'
+  seed: number
+  seedLocked: boolean
+}
+
+export type RenderSettingsPreset = { id: string; name: string; values: RenderIntentValues; createdAt: number; updatedAt: number }
 
 export type AppSettings = {
   llmProvider: 'ollama' | 'lmstudio'
@@ -387,7 +398,7 @@ export type DesktopApi = {
   listOllamaModels(url: string, provider?: AppSettings['llmProvider']): Promise<OllamaModel[]>
   generateWithOllama(url: string, model: string, prompt: string, provider?: AppSettings['llmProvider']): Promise<string>
   generateWithOllamaVision(url: string, model: string, prompt: string, imagePaths: string[], provider?: AppSettings['llmProvider']): Promise<string>
-  generateStructuredWithOllama(url: string, model: string, prompt: string, schema: Record<string, unknown>, provider?: AppSettings['llmProvider']): Promise<unknown>
+  generateStructuredWithOllama(url: string, model: string, prompt: string, schema: Record<string, unknown>, provider?: AppSettings['llmProvider'], imagePaths?: string[]): Promise<unknown>
   getLanStatus(): Promise<LanStatus>
   syncMobileCharacters(characters: unknown[]): Promise<{ synced: number }>
   rotateLanToken(): Promise<LanStatus>

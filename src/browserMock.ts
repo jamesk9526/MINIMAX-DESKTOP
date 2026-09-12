@@ -117,6 +117,32 @@ export function installBrowserMock() {
     generateWithOllamaVision: async () => 'A MiniMax-ready prompt grounded in the visible identity, composition, lighting, and continuity details of the supplied reference images.',
     generateStructuredWithOllama: async (_url, _model, prompt, schema) => {
       const properties = schema.properties as Record<string, unknown> | undefined
+      if (properties?.operation) {
+        const request = prompt.match(/REQUEST:\n([\s\S]*?)(?:\n\n(?:RECENT CONVERSATION|Return exactly)|$)/)?.[1] ?? prompt
+        const asksQuestion = /\?\s*$/.test(request) || /^(?:what|why|how|can you explain|should we|review|analyze)\b/i.test(request)
+        const asksForImage = /\b(?:still image|image prompt|z-image|text-to-image)\b/i.test(request)
+        const directEdit = /\b(?:write|create|make|generate|draft|rewrite|enhance|revise|improve|build|add|change|replace|remove|have|show|set|turn|keep)\b/i.test(request)
+        const imagePrompt = /For a direct request to create or edit an active still image/i.test(prompt) && asksForImage && directEdit && !asksQuestion
+        const videoPrompt = !imagePrompt && /For a direct request to create or edit this active video/i.test(prompt) && directEdit && !asksQuestion
+        const intent = imagePrompt ? 'image' : videoPrompt ? 'video' : 'text'
+        const operation = intent === 'image' ? 'replace' : intent === 'video' ? /\b(?:rewrite|replace|change|remove|revise|improve|enhance|polish|refine)\b|\bmake\b.*\bbetter\b/i.test(request) ? 'replace' : 'append' : 'none'
+        const duration = prompt.match(/full (\d+(?:\.\d+)?) second/)?.[1] ?? '5.0'
+        const reply = imagePrompt
+          ? `A still image prompt following the request: ${request}`
+          : videoPrompt && operation === 'replace'
+            ? `0.0–2.0s: Establish the requested starting state with a steady camera.\n2.0–${duration}s: Complete the requested action with natural movement and settle on the final pose.`
+            : videoPrompt
+              ? `Addendum: ${request}`
+              : 'I can help with the current workspace. Tell me the change you want and I will follow it.'
+        return { reply, operation, intent }
+      }
+      if (properties?.direction) {
+        const draft = prompt.match(/DRAFT:\n([\s\S]*?)(?:\n\nReturn the required structured fields|$)/)?.[1]?.trim()
+        return {
+          summary: 'A clear, continuous shot that preserves the authored scene and its constraints.',
+          direction: draft ? `Clarify the authored scene in concrete, observable terms while preserving every requested detail. ${draft}` : 'A single, continuous cinematic shot with physically coherent subject movement and synchronized natural sound.',
+        }
+      }
       if (properties?.reply) {
         const filmmakerRequest = prompt.match(/FILMMAKER: ([\s\S]*)$/)?.[1] ?? prompt
         const buildAssets = /Create the recurring characters/i.test(filmmakerRequest)

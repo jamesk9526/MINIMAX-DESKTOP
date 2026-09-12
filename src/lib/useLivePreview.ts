@@ -74,6 +74,12 @@ export function useLivePreview(url: string | undefined, enabled: boolean, onProg
           let msg: { type: string; data: { prompt_id?: string; node?: string | null; value?: number; max?: number; image?: string; mime?: string; fps?: number; rate?: number; step?: number; total?: number; output?: { images?: Array<{ filename: string; subfolder?: string; type?: string }> } } }
           try { msg = JSON.parse(event.data) } catch { return }
           const promptId = msg.data.prompt_id ?? active
+          // ComfyUI can reconnect the event socket after a prompt has already
+          // started. In that case execution_start is not replayed, so use the
+          // prompt id carried by later node/progress events as the active job.
+          // Without this, valid LTX preview frames are discarded until a new
+          // render happens to start while the socket is connected.
+          if (msg.data.prompt_id) active = msg.data.prompt_id
           if (msg.type === 'execution_start') {
             active = msg.data.prompt_id ?? ''
             if (blobUrl) URL.revokeObjectURL(blobUrl)

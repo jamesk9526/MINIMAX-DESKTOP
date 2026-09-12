@@ -29,7 +29,17 @@ type GenerationDefaults = {
   textEncoderPreference: 'fast' | 'quality'
   turbo8Profile: 'stable' | 'balanced' | 'motion'
 }
-type RenderSettingsPreset = { id: string; name: string; values: GenerationDefaults; createdAt: number; updatedAt: number }
+type RenderIntentValues = GenerationDefaults & {
+  userLoras: Array<{ name: string; strength: number }>
+  rtxModel: string
+  livePreviewMode: 'standard' | 'h3-override'
+  noDialogue: boolean
+  naturalMovement: boolean
+  clothingPolicy: 'wardrobe' | 'underwear' | 'unrestricted'
+  seed: number
+  seedLocked: boolean
+}
+type RenderSettingsPreset = { id: string; name: string; values: RenderIntentValues; createdAt: number; updatedAt: number }
 
 type AppSettings = {
   llmProvider: 'ollama' | 'lmstudio'
@@ -248,7 +258,18 @@ async function loadSettings(): Promise<AppSettings> {
     generationDefaults.textEncoderPreference = raw.generationDefaults?.textEncoderPreference === 'quality' ? 'quality' : 'fast'
     generationDefaults.turbo8Profile = raw.generationDefaults?.turbo8Profile === 'stable' || raw.generationDefaults?.turbo8Profile === 'motion' ? raw.generationDefaults.turbo8Profile : 'balanced'
     const uiScale = Math.max(75, Math.min(150, Number(raw.uiScale) || defaults.uiScale))
-    const renderSettingsPresets = Array.isArray(raw.renderSettingsPresets) ? raw.renderSettingsPresets.filter((preset) => preset && typeof preset.name === 'string' && preset.name.trim()).slice(0, 30).map((preset) => ({ id: typeof preset.id === 'string' ? preset.id : randomUUID(), name: preset.name.trim().slice(0, 60), values: { ...generationDefaults, ...(preset.values ?? {}) }, createdAt: Number(preset.createdAt) || Date.now(), updatedAt: Number(preset.updatedAt) || Date.now() })) : []
+    const renderIntentDefaults: RenderIntentValues = { ...generationDefaults, userLoras: [], rtxModel: '', livePreviewMode: 'standard', noDialogue: true, naturalMovement: true, clothingPolicy: 'wardrobe', seed: 0, seedLocked: true }
+    const renderSettingsPresets = Array.isArray(raw.renderSettingsPresets) ? raw.renderSettingsPresets.filter((preset) => preset && typeof preset.name === 'string' && preset.name.trim()).slice(0, 30).map((preset) => {
+      const rawValues = preset.values && typeof preset.values === 'object' ? preset.values as Record<string, unknown> : {}
+      const userLoras = Array.isArray(rawValues.userLoras) ? rawValues.userLoras.reduce<Array<{ name: string; strength: number }>>((items, item) => {
+        if (!item || typeof item !== 'object' || typeof (item as { name?: unknown }).name !== 'string') return items
+        const lora = item as { name: string; strength?: unknown }
+        items.push({ name: lora.name, strength: Number.isFinite(Number(lora.strength)) ? Number(lora.strength) : 1 })
+        return items
+      }, []).slice(0, 3) : []
+      const values: RenderIntentValues = { ...renderIntentDefaults, ...(rawValues as Partial<RenderIntentValues>), userLoras, rtxModel: typeof rawValues.rtxModel === 'string' ? rawValues.rtxModel : '', livePreviewMode: rawValues.livePreviewMode === 'h3-override' ? 'h3-override' : 'standard', noDialogue: rawValues.noDialogue !== false, naturalMovement: rawValues.naturalMovement !== false, clothingPolicy: rawValues.clothingPolicy === 'underwear' || rawValues.clothingPolicy === 'unrestricted' ? rawValues.clothingPolicy : 'wardrobe', seed: Math.max(0, Math.min(999999999999, Math.floor(Number(rawValues.seed) || 0))), seedLocked: rawValues.seedLocked !== false }
+      return { id: typeof preset.id === 'string' ? preset.id : randomUUID(), name: preset.name.trim().slice(0, 60), values, createdAt: Number(preset.createdAt) || Date.now(), updatedAt: Number(preset.updatedAt) || Date.now() }
+    }) : []
     const attentionBackend = raw.attentionBackend === 'kitchen' || raw.attentionBackend === 'sage' || raw.attentionBackend === 'native' ? raw.attentionBackend : 'automatic'
     return { ...defaults, ...raw, uiScale, attentionBackend, h3ParallelAttentionEnabled: raw.h3ParallelAttentionEnabled === true, queueDelaySeconds: Math.max(0, Math.min(600, Number(raw.queueDelaySeconds) || 0)), experimentalLtxMsrEnabled: raw.experimentalLtxMsrEnabled === true, blurNsfwLivePreviews: raw.blurNsfwLivePreviews === true, llmProvider: raw.llmProvider === 'lmstudio' ? 'lmstudio' : 'ollama', characterDetailReferencesEnabled: raw.characterDetailReferencesEnabled === true, renderSettingsPresets, paths: { ...defaults.paths, ...raw.paths }, generationDefaults }
   } catch {
@@ -612,9 +633,9 @@ function createWindow() {
     height: 940,
     minWidth: 860,
     minHeight: 620,
-    backgroundColor: '#0d100f',
+    backgroundColor: '#071524',
     titleBarStyle: 'hidden',
-    titleBarOverlay: { color: '#101412', symbolColor: '#d9e2dc', height: 42 },
+    titleBarOverlay: { color: '#071524', symbolColor: '#d8ebff', height: 48 },
     webPreferences: {
       preload: join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -632,9 +653,9 @@ function createWindow() {
         height: 780,
         minWidth: 420,
         minHeight: 560,
-        backgroundColor: '#0d100f',
+        backgroundColor: '#071524',
         titleBarStyle: 'hidden',
-        titleBarOverlay: { color: '#101412', symbolColor: '#d9e2dc', height: 42 },
+        titleBarOverlay: { color: '#071524', symbolColor: '#d8ebff', height: 48 },
         webPreferences: {
           preload: join(__dirname, 'preload.js'),
           contextIsolation: true,
@@ -867,14 +888,29 @@ app.whenReady().then(async () => {
     if (!answer) throw new Error(typeof error === 'string' ? error : error?.message || `${provider === 'lmstudio' ? 'LM Studio' : 'Ollama'} could not inspect the supplied reference images. Choose a local vision-capable model in Settings.`)
     return answer
   })
-  ipcMain.handle('ollama:structured', async (_event, url: string, model: string, prompt: string, schema: Record<string, unknown>, provider: LlmProvider = 'ollama') => {
+  ipcMain.handle('ollama:structured', async (_event, url: string, model: string, prompt: string, schema: Record<string, unknown>, provider: LlmProvider = 'ollama', imagePaths: string[] = []) => {
     if (provider === 'lmstudio') assertLocalLmStudioUrl(url)
+    const allowedImages = new Set(['.png', '.jpg', '.jpeg', '.webp'])
+    const requestedPaths = imagePaths.slice(0, 6)
+    const images: Array<{ base64: string; mime: string }> = []
+    let totalImageBytes = 0
+    for (const filePath of requestedPaths) {
+      // Keep reference-to-pixel indexing intact: stop at the first invalid or
+      // oversized source rather than silently shifting later images forward.
+      if (!existsSync(filePath) || !allowedImages.has(extname(filePath).toLowerCase())) break
+      const bytes = await readFile(filePath)
+      if (bytes.length > 25_000_000 || totalImageBytes + bytes.length > 50_000_000) break
+      totalImageBytes += bytes.length
+      const extension = extname(filePath).toLowerCase()
+      const mime = extension === '.png' ? 'image/png' : extension === '.webp' ? 'image/webp' : 'image/jpeg'
+      images.push({ base64: bytes.toString('base64'), mime })
+    }
     const data = await comfyFetch(url, provider === 'lmstudio' ? lmStudioPath(url, '/chat/completions') : '/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(provider === 'lmstudio' ? { model, messages: [{ role: 'user', content: prompt }], stream: false, response_format: { type: 'json_schema', json_schema: { name: 'minimax_studio_response', strict: true, schema } }, temperature: 0.2, max_tokens: 6000 } : {
+      body: JSON.stringify(provider === 'lmstudio' ? { model, messages: [{ role: 'user', content: images.length ? [{ type: 'text', text: prompt }, ...images.map((image) => ({ type: 'image_url', image_url: { url: `data:${image.mime};base64,${image.base64}` } }))] : prompt }], stream: false, response_format: { type: 'json_schema', json_schema: { name: 'minimax_studio_response', strict: true, schema } }, temperature: 0.2, max_tokens: 6000 } : {
         model,
-        messages: [{ role: 'user', content: prompt }],
+        messages: [{ role: 'user', content: prompt, ...(images.length ? { images: images.map((image) => image.base64) } : {}) }],
         stream: false,
         keep_alive: 0,
         think: false,

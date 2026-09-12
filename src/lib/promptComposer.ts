@@ -7,6 +7,108 @@ import type { CharacterProject, GenerationMode, MediaFile, MovieProject, MovieRe
 
 export type PromptAssistantTool = 'enhance' | 'timeline' | 'audio'
 
+export const h3PromptDirectionSchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    summary: { type: 'string' },
+    direction: { type: 'string' },
+  },
+  required: ['summary', 'direction'],
+} as const
+
+export function formatH3PromptOutput(direction: string, summary: string, context: { mode: GenerationMode; duration: number; noDialogue?: boolean; referenceMap?: string[]; request?: string }) {
+  const cleanDirection = normalizePromptDirection(direction)
+  if (!cleanDirection) throw new Error('The local model returned an empty shot direction. Try again with a more specific request.')
+  const suppressVoices = context.noDialogue || /\b(?:no[- ]dialogue|no speech|without (?:any )?(?:speech|dialogue)|no narration|without narration|silent scene)\b/i.test(`${context.request ?? ''}\n${cleanDirection}`)
+  const soundscape = suppressVoices
+    ? 'Only natural ambience and synchronized physical sound effects described in the shot; no speech, narration, singing, lip-sync, captions, or text overlays.'
+    : 'Use only the synchronized ambience, physical sound effects, and dialogue explicitly described in the shot.'
+  const hasMusic = /\b(?:background music|score|soundtrack|music|song)\b/i.test(`${context.request ?? ''}\n${cleanDirection}`)
+  const music = hasMusic
+    ? 'Use only the non-diegetic music explicitly requested in the shot; do not add another score.'
+    : 'N/A'
+  const shot = /^\[Shot\s+1\]/i.test(cleanDirection) ? cleanDirection : `[Shot 1] ${cleanDirection}`
+
+  if (context.mode === 'reference') {
+    const assignments = (context.referenceMap ?? []).map(parseReferenceAssignment).filter((item): item is ReferenceAssignment => Boolean(item))
+    const definitions = formatReferenceDefinitions(assignments)
+    const retention = assignments.length
+      ? assignments.map((item) => `  ${item.source}: ${item.source.startsWith('Picture') ? 'fully_preserved — retain only the attributes assigned in the reference map' : item.source.startsWith('Video') ? 'weak_reference — transfer only the explicitly requested motion or timing qualities' : 'reference — use only the explicitly requested voice or sound qualities'}`).join('\n')
+      : '  N/A'
+    const summaryText = normalizePromptDirection(summary) || 'One coherent target video following the requested shot direction.'
+    const summaryLine = /^\[(?:reference generation)\]/i.test(summaryText) ? summaryText : `[reference generation] ${summaryText}`
+    return [
+      `subject_definitions:\n${definitions}`,
+      `summary: ${summaryLine}`,
+      `retention_analysis:\n${retention}`,
+      `detailed_description: ${shot}`,
+      `overall_soundscape: ${soundscape}`,
+      `non_diegetic_music: ${music}`,
+    ].join('\n\n')
+  }
+
+  const alignment = context.mode === 'image'
+    ? 'For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.'
+    : context.mode === 'frames'
+      ? `For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced; at ${context.duration.toFixed(2)} seconds, <Picture 2> (from [Shot 1]) is fully referenced.`
+      : ''
+  return [
+    alignment,
+    `integrated_multimodal_description: ${shot}`,
+    `overall_soundscape: ${soundscape}`,
+    `non_diegetic_music: ${music}`,
+  ].filter(Boolean).join('\n\n')
+}
+
+type ReferenceAssignment = { source: string; label: string }
+
+function parseReferenceAssignment(entry: string): ReferenceAssignment | null {
+  const [sourceText, ...labelParts] = entry.split(' = ')
+  const source = sourceText?.replace(/[<>]/g, '').trim()
+  const label = labelParts.join(' = ').trim()
+  return source && label ? { source, label } : null
+}
+
+function formatReferenceDefinitions(assignments: ReferenceAssignment[]) {
+  const pictures = assignments.filter((item) => item.source.startsWith('Picture'))
+  const subjects = new Map<string, Array<{ role: string; source: string }>>()
+  pictures.forEach((item, index) => {
+    const character = item.label.match(/^Character:\s*(.+?)(?:\s*\/\s*(.+))?$/i)
+    const characterAsset = item.label.match(/^(Hair|Wardrobe|Accessory|Detail):\s*(.+?)\s+for\s+(.+)$/i)
+    const location = item.label.match(/^Location:\s*(.+)$/i)
+    const [fallbackSubject, ...fallbackRoles] = item.label.split(/\s+\/\s+/)
+    const subject = character?.[1].trim() || characterAsset?.[3].trim() || location?.[1].trim() || fallbackSubject.trim() || `Subject ${index + 1}`
+    const roles = subjects.get(subject) ?? []
+    const explicitRole = character?.[2]?.trim() || (characterAsset ? `${characterAsset[1].toLowerCase()}: ${characterAsset[2].trim()}` : location ? 'location' : fallbackRoles.join(' / ').trim())
+    const role = explicitRole || (roles.length ? `angle ${roles.length + 1}` : 'master')
+    roles.push({ role, source: item.source })
+    subjects.set(subject, roles)
+  })
+  const lines: string[] = []
+  for (const [subject, references] of subjects) {
+    lines.push(`  ${subject}:`)
+    references.forEach(({ role, source }) => lines.push(`    ${role}: ${source}`))
+  }
+  assignments.filter((item) => !item.source.startsWith('Picture')).forEach((item) => {
+    const kind = item.source.startsWith('Video') ? 'motion_reference' : 'sound_reference'
+    lines.push(`  ${kind}: ${item.source} (${item.label})`)
+  })
+  return lines.length ? lines.join('\n') : '  N/A'
+}
+
+function normalizePromptDirection(value: string) {
+  let text = value.trim().replace(/^```(?:json|text|markdown)?\s*/i, '').replace(/\s*```$/, '').trim()
+  if (text.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(text) as Record<string, unknown>
+      const candidate = parsed.direction ?? parsed.detailed_description ?? parsed.integrated_multimodal_description
+      if (typeof candidate === 'string') text = candidate.trim()
+    } catch { /* Keep the model's text; the schema and formatter still enforce the outer format. */ }
+  }
+  return text.replace(/^(?:detailed_description|integrated_multimodal_description)\s*:\s*/i, '').trim()
+}
+
 const uniqueBindings = (bindings: MovieReferenceBinding[]) => bindings.filter((binding, index) => bindings.findIndex((item) => item.file.path === binding.file.path && item.characterId === binding.characterId && item.purpose === binding.purpose) === index)
 const sentenceKey = (value: string) => value.toLowerCase().replace(/[^a-z0-9<>]+/g, ' ').trim()
 
@@ -181,19 +283,14 @@ export function compileMovieShotPrompt(project: MovieProject, scene: MovieScene,
 export function buildPromptAssistantRequest(tool: PromptAssistantTool, draft: string, context: { duration: number; mode: GenerationMode; referenceMap?: string[]; noDialogue?: boolean }) {
   const preservation = 'Preserve named characters, exact quoted dialogue, visible text, specified camera and lens choices, timing, negative constraints, continuity instructions, and every existing <Picture N>, <Video N>, and <Audio N> assignment. Treat the supplied reference map as authoritative: define what each source contributes and never swap, merge, renumber, or vaguely refer to sources. Never rename characters, invent replacement wardrobe, remove reference tags, add unnecessary cuts, or turn one continuous shot into a montage. Do not make reference images, sheets, mannequins, panels, or their backgrounds visible unless the draft explicitly requests them.'
   const order = 'Use concrete, observable production language in English, preserving only dialogue, lyrics, and visible on-screen text in their original language. For each shot establish visual style and composition, subjects and their starting state, environment and lighting, chronological action and state change, then camera movement as a natural action using motion type plus amplitude and speed only when useful, synchronized diegetic sound, and exact dialogue. Use [Shot 1] with no timestamp; only explicit later cuts may use [Shot N] At MM:SS.mmm with strictly increasing times inside the requested duration. Prefer a camera move to a cut when the scene has not meaningfully changed. Give speakers stable (S1), (S2) IDs and put only verbatim dialogue in <d>[Language] ...</d>.'
-  const format = context.mode === 'reference'
-    ? 'Return the official full-reference H3 structure in this exact order: subject_definitions, summary, retention_analysis, detailed_description, overall_soundscape, non_diegetic_music. Start summary with an appropriate bracketed task type such as [reference generation]. Use stable <Subject N> labels for reusable people, places, objects, or styles; cite their <Picture N>, <Video N>, and <Audio N> sources in the definition. In retention_analysis, use the official markers fully_preserved, partially_preserved, attribute_transfer, or weak_reference for visible sources and fully_copy, partially_copy, reference, or weak_reference for audio. In detailed_description, put each label at its first visible or audible use. Use N/A for non_diegetic_music unless a score is explicitly requested.'
-    : context.mode === 'image'
-      ? 'Start with the exact I2V alignment line: "For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced." Then return integrated_multimodal_description, overall_soundscape, and non_diegetic_music.'
-      : context.mode === 'frames'
-        ? `Start with the exact first/last-frame alignment line naming <Picture 1> at 0.00 seconds and <Picture 2> at ${context.duration.toFixed(2)} seconds. Then return integrated_multimodal_description, overall_soundscape, and non_diegetic_music. Describe the continuous physical path between the two frames; do not merely restate them.`
-        : 'Return integrated_multimodal_description, overall_soundscape, and non_diegetic_music. Use N/A for non_diegetic_music unless a score is explicitly requested.'
+  const format = 'Return only a concise, complete shot direction as plain text in the JSON direction field. Do not write JSON, Markdown fences, section labels, a preface, alternatives, or duplicate drafts. The app will add the fixed MiniMax H3 sections and reference assignments.'
+  const adherence = 'Follow the authored draft literally. When asked only to enhance it, preserve every named subject, action, relationship, setting, wardrobe instruction, camera choice, timing, sound, and negative constraint; improve clarity and concrete observability without replacing the scene with generic cinematic language or adding new story facts. For an explicit requested change, apply that change first and preserve all unaffected details.'
   const task = tool === 'enhance'
-      ? `Rewrite the draft as one polished MiniMax H3 ${context.mode === 'reference' ? 'reference-to-video' : context.mode === 'image' ? 'image-to-video' : context.mode === 'frames' ? 'first/last-frame' : 'text-to-video'} prompt. ${order} ${format}`
+      ? `Rewrite the draft as one polished MiniMax H3 ${context.mode === 'reference' ? 'reference-to-video' : context.mode === 'image' ? 'image-to-video' : context.mode === 'frames' ? 'first/last-frame' : 'text-to-video'} shot direction. ${adherence} ${order} ${format}`
     : tool === 'timeline'
-      ? `Rewrite the draft as one continuous MiniMax H3 shot lasting exactly ${context.duration} seconds. Use ${context.duration <= 6 ? 'one shot with 2–3 action beats' : context.duration <= 10 ? 'one shot with 3–5 action beats' : 'one shot with 4–6 action beats'}. If a cut is explicitly required, label later shots as [Shot N] At MM:SS.mmm with strictly increasing times. Keep motion physically achievable, preserve screen direction and identity, avoid montages, and reserve time for the final action to settle. ${order} ${format}`
-      : `Preserve the visual direction and strengthen synchronized dialogue/vocal intent, ambience, sound effects, spatial placement, timing, and clean transitions. State no music when a score is not requested. ${order} ${format}`
-  return [task, preservation, context.noDialogue ? 'Audio constraint: no spoken dialogue, narration, voice-over, singing, lip-sync, subtitles, captions, or text overlays. Preserve ambient sound effects only.' : 'For each speaking person, use a stable speaker ID such as (S1); put only the verbatim dialogue inside <d>[Language] ...</d>.', `Effective duration: ${context.duration} seconds`, `Effective generation route: ${context.mode}`, context.referenceMap?.length ? `REFERENCE MAP (authoritative):\n${context.referenceMap.join('\n')}` : '', 'Return only the finished prompt, with no analysis, preface, Markdown fence, or alternatives.', `DRAFT:\n${draft.trim()}`].filter(Boolean).join('\n\n')
+      ? `Rewrite the draft as one continuous MiniMax H3 shot lasting exactly ${context.duration} seconds. Preserve the core events and use ${context.duration <= 6 ? '2–3' : context.duration <= 10 ? '3–5' : '4–6'} chronological action beats. If a cut is explicitly required, label later shots as [Shot N] At MM:SS.mmm with strictly increasing times. Keep motion physically achievable, preserve screen direction and identity, avoid montages, and reserve time for the final action to settle. ${adherence} ${order} ${format}`
+      : `Preserve the visual direction and strengthen only synchronized dialogue/vocal intent, ambience, sound effects, spatial placement, timing, and clean transitions. State no music when a score is not requested. ${adherence} ${order} ${format}`
+  return [task, preservation, context.noDialogue ? 'Audio constraint: no spoken dialogue, narration, voice-over, singing, lip-sync, subtitles, captions, or text overlays. Preserve ambient sound effects only.' : 'For each speaking person, use a stable speaker ID such as (S1); put only the verbatim dialogue inside <d>[Language] ...</d>.', `Effective duration: ${context.duration} seconds`, `Effective generation route: ${context.mode}`, context.referenceMap?.length ? `REFERENCE MAP (authoritative):\n${context.referenceMap.join('\n')}` : '', `DRAFT:\n${draft.trim()}`].filter(Boolean).join('\n\n')
 }
 
 export function resolveMovieShot(project: MovieProject, scene: MovieScene, shot: MovieShot, library: CharacterProject[], continuityFrame?: MediaFile): ResolvedMovieShot {

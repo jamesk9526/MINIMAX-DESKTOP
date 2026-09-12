@@ -3,10 +3,11 @@ import { LTX25_MAX_PIXELS, LTX25_RESOLUTIONS, ltx25ResolutionLabel } from '../li
 
 const sizes: Record<string, string[]> = {
   landscape: ['608x352', '736x416', '768x448', '864x480', '960x544', '1024x576', '1056x608', '1152x640', '1216x672', '1280x736', '1344x768'],
+  ultrawide: ['672x288', '896x384', '1120x480', '1216x512', '1344x576'],
   portrait: ['352x608', '416x736', '448x768', '480x864', '544x960', '576x1024', '608x1056', '640x1152', '672x1216', '736x1280', '768x1344'],
   square: ['512x512', '640x640', '768x768'],
 }
-type Orientation = 'landscape' | 'portrait' | 'square'
+type Orientation = 'landscape' | 'ultrawide' | 'portrait' | 'square'
 
 const imageSizes: Record<string, string[]> = {
   '16:9': ['1024x576', '1344x768', '1536x864', '1920x1080'],
@@ -21,7 +22,7 @@ const imageSizes: Record<string, string[]> = {
 
 export function RenderSize({ value, onChange, provider = 'minimax' }: { value: string; onChange(value: string): void; provider?: 'minimax' | 'ltx25' | 'zimage' }) {
   const [w, h] = value.split('x').map(Number)
-  const orientation: Orientation = w === h ? 'square' : w > h ? 'landscape' : 'portrait'
+  const orientation: Orientation = w === h ? 'square' : w / h >= 2.1 ? 'ultrawide' : w > h ? 'landscape' : 'portrait'
   const resolutionOptions: Record<Orientation, readonly string[]> = provider === 'ltx25' ? LTX25_RESOLUTIONS : sizes
   const listed = resolutionOptions[orientation].includes(value)
   const [custom, setCustom] = useState(!listed)
@@ -58,12 +59,15 @@ export function RenderSize({ value, onChange, provider = 'minimax' }: { value: s
   }
   return <fieldset className="render-size"><legend>Output size</legend>
     <label>Orientation<select value={orientation} onChange={(e) => {
-      const next = e.target.value
-      onChange(next === 'square' ? '768x768' : orientation === 'square' ? resolutionOptions[next as Orientation][2] : `${h}x${w}`)
-    }}><option value="landscape">Landscape</option><option value="portrait">Portrait</option><option value="square">Square</option></select></label>
+      const next = e.target.value as Orientation
+      const options = resolutionOptions[next]
+      const recommended = next === 'landscape' ? '1056x608' : next === 'ultrawide' ? '1216x512' : ''
+      const preferred = recommended && options.includes(recommended) ? recommended : options.reduce((best, size) => Math.abs(size.split('x').map(Number).reduce((product, dimension) => product * dimension, 1) - w * h) < Math.abs(best.split('x').map(Number).reduce((product, dimension) => product * dimension, 1) - w * h) ? size : best)
+      onChange(preferred)
+    }}><option value="landscape">Landscape · 16:9</option><option value="ultrawide">Ultrawide · 21:9</option><option value="portrait">Portrait · 9:16</option><option value="square">Square · 1:1</option></select></label>
     <label>Resolution<select value={custom ? '__custom' : value} onChange={(e) => { if (e.target.value === '__custom') setCustom(true); else { setCustom(false); onChange(e.target.value) } }}>{resolutionOptions[orientation].map((size) => <option key={size} value={size}>{size.replace('x', ' × ')}{provider === 'minimax' ? ` · ${qualityLabel(size)}` : provider === 'ltx25' ? ` · ${ltx25ResolutionLabel(size)}` : ''}</option>)}<option value="__custom">Custom…</option></select></label>
     {custom && <div className="custom-resolution" role="group" aria-label="Custom output resolution"><label>Width<input type="number" min="256" max="1920" step="32" value={customWidth} aria-invalid={!validCustom} onChange={(event) => applyCustom(Number(event.target.value), customHeight)} /></label><span aria-hidden="true">×</span><label>Height<input type="number" min="256" max="1920" step="32" value={customHeight} aria-invalid={!validCustom} onChange={(event) => applyCustom(customWidth, Number(event.target.value))} /></label></div>}
-    <p className={`field-help ${custom && !validCustom ? 'error' : ''}`}>{custom && !validCustom ? `Use multiples of 32, at least 256 × 256, within ${(maxPixels / 1e6).toFixed(2)} megapixels. ` : ''}{provider === 'ltx25' ? '32-pixel aligned for LTX‑2.5. Quality mode generates at half size before the official latent 2× refinement stage.' : '32-pixel aligned and kept inside MiniMax H3’s official native canvas. Input crops follow this size.'} {(w * h / 1e6).toFixed(2)} megapixels{provider === 'minimax' && (value === '1344x768' || value === '768x1344') ? ' · native 768p' : ''}</p>
+    <p className={`field-help ${custom && !validCustom ? 'error' : ''}`}>{custom && !validCustom ? `Use multiples of 32, at least 256 × 256, within ${(maxPixels / 1e6).toFixed(2)} megapixels. ` : ''}{provider === 'ltx25' ? '1056 × 608 (16:9) and 1216 × 512 (21:9) are quality-and-speed recommendations with comparable pixel counts. Quality mode generates at half size before the official latent 2× refinement stage.' : '1056 × 608 (16:9) and 1216 × 512 (21:9) are quality-and-speed recommendations with comparable pixel counts. All choices are 32-pixel aligned and input crops follow this size.'} {(w * h / 1e6).toFixed(2)} megapixels{provider === 'minimax' && (value === '1344x768' || value === '768x1344') ? ' · native 768p' : ''}</p>
   </fieldset>
 }
 
@@ -88,6 +92,7 @@ function imageQualityLabel(size: string) {
 }
 
 function qualityLabel(size: string) {
+  if (size === '1056x608' || size === '1216x512') return 'Recommended · quality + speed'
   const [width, height] = size.split('x').map(Number)
   const short = Math.min(width, height)
   if (short >= 768) return 'Native quality'
