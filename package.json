@@ -1,6 +1,6 @@
 {
   "name": "oyama-ai-video-studio",
-  "version": "0.12.48",
+  "version": "0.12.62",
   "private": true,
   "description": "Local-first AI video studio powered by ComfyUI",
   "author": {
@@ -17,6 +17,8 @@
     "build:electron": "tsc -p tsconfig.electron.json",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.electron.json --noEmit",
     "lint": "eslint . --max-warnings 0",
+    "test": "pnpm test:workflows",
+    "test:workflows": "node scripts/test-workflows.cjs",
     "smoke:lan": "node scripts/smoke-lan.cjs",
     "start": "node scripts/launch-electron.cjs",
     "package:win": "pnpm build && electron-builder --win nsis --x64 --config.npmRebuild=false",

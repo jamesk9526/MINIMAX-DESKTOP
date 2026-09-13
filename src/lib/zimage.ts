@@ -20,5 +20,9 @@ export function buildZImage(prompt: string, width: number, height: number, seed:
     '8': { class_type: 'KSampler', inputs: { model: ['7', 0], positive: ['4', 0], negative: ['5', 0], latent_image: ['6', 0], seed, steps, cfg, sampler_name: 'res_multistep', scheduler: 'simple', denoise: 1 } },
     '9': { class_type: 'VAEDecode', inputs: { samples: ['8', 0], vae: ['3', 0] } },
     '10': { class_type: 'SaveImage', inputs: { images: ['9', 0], filename_prefix: 'MiniMax_first_frames/ZImage' } },
+    // KSampler emits sampling previews through ComfyUI's WebSocket. This node
+    // also emits the decoded image as a reliable final preview on servers that
+    // have sampler previews disabled.
+    '11': { class_type: 'PreviewImage', inputs: { images: ['9', 0] } },
   }
 }

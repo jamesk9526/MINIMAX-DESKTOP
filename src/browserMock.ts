@@ -73,6 +73,7 @@ export function installBrowserMock() {
       ...ltxNodes.map((name) => [name, { input: { required: {} } }]),
       ['LTX2SamplingPreviewOverride', { input: { required: {} } }],
       ...aceNodes.map((name) => [name, { input: { required: {} } }]),
+      ['MinimaxH3LatentUpscaler3D', { input: { required: { model_name: ['COMBO', { options: ['minimax_h3_latent_upscaler_3d_fp16.safetensors'] }] } } }],
       ['LatentUpscaleModelLoader', { input: { required: { model_name: ['COMBO', { options: ['ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors'] }] } } }],
       ['UNETLoader', { input: { required: { unet_name: ['COMBO', { options: ['z_image_turbo_bf16.safetensors', 'z_image_bf16.safetensors', 'acestep_v1.5_xl_sft_bf16.safetensors', 'acestep_v1.5_xl_base_bf16.safetensors'] }] } } }],
       ['CLIPLoader', { input: { required: { clip_name: ['COMBO', { options: ['qwen_3_4b.safetensors'] }] } } }],
@@ -185,6 +186,7 @@ export function installBrowserMock() {
     syncMobileCharacters: async (characters) => ({ synced: characters.length }),
     rotateLanToken: async () => ({ running: true, url: `${location.origin}/?mobile=1&token=browser-preview`, desktopUrl: `${location.origin}/?desktop=1&token=browser-preview`, port: Number(location.port) }),
     setWindowAlwaysOnTop: async (enabled) => enabled,
+    openMovieEditor: async () => { window.open(`${location.pathname}?movieEditor=1`, 'oyama-ai-movie', 'popup=yes,width=1440,height=920,resizable=yes') },
   }
   window.minimax = api
 }

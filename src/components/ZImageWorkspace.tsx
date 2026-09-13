@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AlertCircle, Check, CircleStop, Dices, Film, Gauge, ImagePlus, LoaderCircle, Sparkles, WandSparkles } from 'lucide-react'
 import { buildZImage, type ZImageVariant } from '../lib/zimage'
 import { choices, type ObjectInfo } from '../lib/comfyInfo'
 import { RenderSize } from './RenderSize'
 import { SmartPromptEditor } from './SmartPromptEditor'
 import type { MediaFile } from '../types'
+import { useLivePreview, type LiveProgress } from '../lib/useLivePreview'
 
 type StoredWorkspace = {
   prompt: string
@@ -46,6 +47,12 @@ const isBaseModel = (name: string) => isZImageModel(name) && !/turbo/i.test(name
 const preferredModel = (models: string[], variant: ZImageVariant) => models.find(variant === 'turbo' ? isTurboModel : isBaseModel)
   ?? (variant === 'turbo' ? 'z_image_turbo_bf16.safetensors' : 'z_image_bf16.safetensors')
 
+type ZImageJob = { id: string; url: string }
+type HistoryEntry = {
+  status?: { status_str?: string }
+  outputs?: Record<string, { images?: Array<{ filename: string; subfolder?: string; type?: string }> }>
+}
+
 export function ZImageWorkspace({
   url, info, connected, ollamaAvailable, llmProvider, ollamaUrl, ollamaModel, outputDirectory, attentionBackend, onUse, onUseLtx,
 }: {
@@ -72,12 +79,24 @@ export function ZImageWorkspace({
   const [seed, setSeed] = useState(initial.seed)
   const [steps, setSteps] = useState(initial.steps)
   const [guidance, setGuidance] = useState(initial.guidance)
-  const [job, setJob] = useState<{ id: string; url: string } | null>(null)
+  const [job, setJob] = useState<ZImageJob | null>(null)
   const [result, setResult] = useState<MediaFile | null>(null)
   const [busy, setBusy] = useState(false)
   const [assisting, setAssisting] = useState(false)
   const [message, setMessage] = useState('')
   const [error, setError] = useState(false)
+  const jobRef = useRef<ZImageJob | null>(null)
+  const [liveProgress, setLiveProgress] = useState<LiveProgress | null>(null)
+  const liveProgressRef = useRef<LiveProgress | null>(null)
+  const onLiveProgress = useCallback((id: string, update: LiveProgress) => {
+    if (jobRef.current?.id === id) { liveProgressRef.current = update; setLiveProgress(update) }
+  }, [])
+  const live = useLivePreview(url, connected, onLiveProgress)
+
+  const updateJob = useCallback((next: ZImageJob | null) => {
+    jobRef.current = next
+    setJob(next)
+  }, [])
 
   useEffect(() => {
     const loadPrompt = (event: Event) => {
@@ -96,31 +115,41 @@ export function ZImageWorkspace({
     if (!job) return
     let disposed = false
     let timer: ReturnType<typeof setTimeout>
+    let completedWithoutOutputPolls = 0
     const poll = async () => {
       try {
         const history = await window.minimax.getHistory(job.url, job.id)
-        const entry = history[job.id] as { status?: { status_str: string }; outputs?: Record<string, { images?: Array<{ filename: string; subfolder?: string; type?: string }> }> } | undefined
+        const entry = history[job.id] as HistoryEntry | undefined
         if (entry?.status?.status_str === 'error') throw new Error('Z-Image failed. Check the selected components and ComfyUI log.')
-        const image = Object.values(entry?.outputs ?? {}).flatMap((output) => output.images ?? [])[0]
+        // The workflow's SaveImage is node 10. Prefer it so a preview-node
+        // temporary image can never be mistaken for the production output.
+        const image = entry?.outputs?.['10']?.images?.[0]
+          ?? Object.values(entry?.outputs ?? {}).flatMap((output) => output.images ?? [])[0]
         if (image) {
           const preview = await window.minimax.getOutputImage(job.url, image)
           const saved = await window.minimax.saveComfyOutputImage(job.url, image, outputDirectory)
           if (!disposed) {
             setResult({ ...saved, preview, kind: 'image' })
-            setJob(null); setBusy(false); setError(false); setMessage('Image complete and ready to use.')
+            updateJob(null); setBusy(false); setError(false); liveProgressRef.current = null; setLiveProgress(null); setMessage('Image complete and ready to use.')
           }
           return
         }
-        if (!disposed) setMessage('Rendering the image in ComfyUI…')
+        if (entry?.status?.status_str === 'success') {
+          completedWithoutOutputPolls += 1
+          if (completedWithoutOutputPolls > 2) throw new Error('ComfyUI finished Z-Image but did not return a saved image. Check the SaveImage node and ComfyUI log.')
+          if (!disposed) setMessage('ComfyUI finished; collecting the saved image…')
+        } else if (!disposed) {
+          setMessage(liveProgressRef.current?.label ?? 'Rendering the image in ComfyUI…')
+        }
       } catch (caught) {
-        if (!disposed) { setMessage(caught instanceof Error ? caught.message : String(caught)); setError(true); setBusy(false); setJob(null) }
+        if (!disposed) { setMessage(caught instanceof Error ? caught.message : String(caught)); setError(true); setBusy(false); liveProgressRef.current = null; setLiveProgress(null); updateJob(null) }
         return
       }
       if (!disposed) timer = setTimeout(poll, 2000)
     }
     void poll()
     return () => { disposed = true; clearTimeout(timer) }
-  }, [job, outputDirectory])
+  }, [job, outputDirectory, updateJob])
 
   const installedModels = choices(info, 'UNETLoader', 'unet_name')
   const turboInstalled = installedModels.some(isTurboModel)
@@ -146,11 +175,11 @@ export function ZImageWorkspace({
 
   const create = async () => {
     if (!connected || !available || !prompt.trim()) return
-    setBusy(true); setResult(null); setError(false); setMessage(`Submitting ${variant === 'turbo' ? 'Z-Image Turbo' : 'Original Z-Image'} workflow…`)
+    setBusy(true); setResult(null); setError(false); liveProgressRef.current = null; setLiveProgress(null); setMessage(`Submitting ${variant === 'turbo' ? 'Z-Image Turbo' : 'Original Z-Image'} workflow…`)
     try {
       const [width, height] = resolution.split('x').map(Number)
-      const response = await window.minimax.submitPrompt(url, buildZImage(prompt.trim(), width, height, seed, model, encoder, vae, steps, guidance, variant, variant === 'base' ? negativePrompt.trim() : '', attentionBackend))
-      setJob({ id: response.prompt_id, url })
+      const response = await window.minimax.submitPrompt(url, buildZImage(prompt.trim(), width, height, seed, model, encoder, vae, steps, guidance, variant, variant === 'base' ? negativePrompt.trim() : '', attentionBackend), live.clientId)
+      updateJob({ id: response.prompt_id, url })
     } catch (caught) {
       setMessage(caught instanceof Error ? caught.message : String(caught)); setError(true); setBusy(false)
     }
@@ -163,7 +192,7 @@ export function ZImageWorkspace({
       setMessage('Image generation cancelled.'); setError(false)
     } catch (caught) {
       setMessage(`Could not cancel: ${caught instanceof Error ? caught.message : String(caught)}`); setError(true)
-    } finally { setJob(null); setBusy(false) }
+    } finally { updateJob(null); setBusy(false); liveProgressRef.current = null; setLiveProgress(null) }
   }
 
   const enhance = async () => {
@@ -176,6 +205,8 @@ export function ZImageWorkspace({
     } catch (caught) { setMessage(caught instanceof Error ? caught.message : String(caught)); setError(true) }
     finally { setAssisting(false) }
   }
+
+  const visibleLivePreview = busy && job && live.preview?.promptId === job.id ? live.preview : null
 
   return <div className="standard-page zimage-workspace">
     <div className="page-heading">
@@ -215,7 +246,7 @@ export function ZImageWorkspace({
 
       <aside className="zimage-preview-panel">
         <div className="panel-heading"><div><span>OUTPUT</span><strong>Image preview</strong></div>{result && <span className="zimage-complete"><Check size={13} />Ready</span>}</div>
-        <div className="zimage-preview-stage">{result?.preview ? <img src={result.preview} alt="Generated Z-Image output" /> : busy ? <div className="render-state"><LoaderCircle className="spin" /><strong>Creating your image</strong><span>{resolution.replace('x', ' × ')}</span></div> : <div className="empty-preview"><div className="preview-icon"><ImagePlus size={28} /></div><strong>Your image will appear here</strong><span>Describe the still, select a canvas, and generate it locally.</span></div>}</div>
+        <div className="zimage-preview-stage">{result?.preview ? <img src={result.preview} alt="Generated Z-Image output" /> : visibleLivePreview ? <figure className="live-preview zimage-live-preview"><img src={visibleLivePreview.url} alt="Live Z-Image sampling preview" /><figcaption>Live sampling preview{visibleLivePreview.step && visibleLivePreview.totalSteps ? ` · step ${visibleLivePreview.step} of ${visibleLivePreview.totalSteps}` : ''}</figcaption></figure> : busy ? <div className="render-state"><LoaderCircle className="spin" /><strong>Creating your image</strong><span>{liveProgress?.label ?? `${resolution.replace('x', ' × ')} · waiting for live preview`}</span></div> : <div className="empty-preview"><div className="preview-icon"><ImagePlus size={28} /></div><strong>Your image will appear here</strong><span>Describe the still, select a canvas, and generate it locally.</span></div>}</div>
         <div className="zimage-preview-actions"><span>{result ? `${result.name} · ${resolution.replace('x', ' × ')}` : 'Saved to ComfyUI · MiniMax_first_frames'}</span><div><button className="secondary-button" disabled={!result} onClick={() => result && onUse(result, resolution)}><ImagePlus size={16} />MiniMax I2V</button><button className="primary-button" disabled={!result} onClick={() => result && onUseLtx(result)} title="Loads an identity-preserving LTX image-to-video prompt"><Film size={16} />Send to LTX 2.5</button></div></div>
       </aside>
     </div>

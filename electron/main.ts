@@ -25,7 +25,7 @@ type GenerationDefaults = {
   shiftVideo: number
   shiftAudio: number
   loraStrength: number
-  upscaleMode: 'off' | 'ltx' | 'rtx'
+  upscaleMode: 'off' | 'h3' | 'ltx' | 'rtx'
   textEncoderPreference: 'fast' | 'quality'
   turbo8Profile: 'stable' | 'balanced' | 'motion'
 }
@@ -753,6 +753,26 @@ async function resolveVideoSource(source: string) {
   throw new Error('Unsupported video source.')
 }
 
+let movieEditorWindow: BrowserWindow | null = null
+
+function createMovieEditorWindow() {
+  if (movieEditorWindow && !movieEditorWindow.isDestroyed()) { movieEditorWindow.focus(); return }
+  nativeTheme.themeSource = 'dark'
+  const window = new BrowserWindow({
+    width: 1480, height: 940, minWidth: 980, minHeight: 680,
+    backgroundColor: '#171719', title: 'Oyama AI Movie',
+    autoHideMenuBar: true,
+    webPreferences: { preload: join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false },
+  })
+  movieEditorWindow = window
+  window.setMenuBarVisibility(false)
+  void loadSettings().then((settings) => window.webContents.setZoomFactor(settings.uiScale / 100))
+  window.on('closed', () => { if (movieEditorWindow === window) movieEditorWindow = null })
+  const devUrl = process.env.VITE_DEV_SERVER_URL
+  if (devUrl) void window.loadURL(`${devUrl}${devUrl.includes('?') ? '&' : '?'}movieEditor=1`)
+  else void window.loadFile(join(__dirname, '..', 'dist', 'index.html'), { query: { movieEditor: '1' } })
+}
+
 function createWindow() {
   nativeTheme.themeSource = 'dark'
   const window = new BrowserWindow({
@@ -771,18 +791,23 @@ function createWindow() {
   })
   window.setMenuBarVisibility(false)
   void loadSettings().then((settings) => window.webContents.setZoomFactor(settings.uiScale / 100))
-  window.webContents.setWindowOpenHandler(({ url }) => {
+  window.webContents.setWindowOpenHandler(({ url, frameName }) => {
     if (url !== 'about:blank') return { action: 'deny' }
+    const isPreviewMonitor = frameName === 'oyama-ai-video-studio-preview'
     return {
       action: 'allow',
       overrideBrowserWindowOptions: {
-        width: 560,
-        height: 780,
-        minWidth: 420,
-        minHeight: 560,
-        backgroundColor: '#071524',
+        // The monitor is intentionally a wide, independently movable surface.
+        // Other popouts (for example, the copilot) retain their compact layout.
+        width: isPreviewMonitor ? 1080 : 560,
+        height: isPreviewMonitor ? 720 : 780,
+        minWidth: isPreviewMonitor ? 560 : 420,
+        minHeight: isPreviewMonitor ? 420 : 560,
+        resizable: true,
+        movable: true,
+        backgroundColor: isPreviewMonitor ? '#07100b' : '#071524',
         titleBarStyle: 'hidden',
-        titleBarOverlay: { color: '#071524', symbolColor: '#d8ebff', height: 48 },
+        titleBarOverlay: { color: isPreviewMonitor ? '#07100b' : '#071524', symbolColor: '#d8ebff', height: 48 },
         webPreferences: {
           preload: join(__dirname, 'preload.js'),
           contextIsolation: true,
@@ -851,6 +876,7 @@ app.whenReady().then(async () => {
     target.setAlwaysOnTop(Boolean(enabled), 'floating')
     return target.isAlwaysOnTop()
   })
+  ipcMain.handle('window:open-movie-editor', () => { createMovieEditorWindow() })
   ipcMain.handle('lan:status', () => lanStatus)
   ipcMain.handle('lan:sync-characters', (_event, characters: unknown[]) => { mobileCharacterLibrary = Array.isArray(characters) ? characters : []; return { synced: mobileCharacterLibrary.length } })
   ipcMain.handle('lan:rotate-token', async () => {
@@ -1143,7 +1169,16 @@ app.whenReady().then(async () => {
     const startSeconds = start / rate
     const endSeconds = startSeconds + duration
     const outputRate = Number.isInteger(rate) ? String(rate) : rate.toFixed(6)
-    await runFfmpeg(ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-i', input, '-vf', `select=between(n\\,${start}\\,${end}),setpts=N/${outputRate}/TB`, '-af', `atrim=start=${startSeconds}:end=${endSeconds},asetpts=PTS-STARTPTS`, '-t', duration.toFixed(6), '-map', '0:v:0', '-map', '0:a?', '-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p', '-r', outputRate, '-fps_mode', 'vfr', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', '-y', outputPath])
+    // select + setpts produces a frame-indexed CFR timeline. Do not combine
+    // output -r with VFR fps_mode: newer FFmpeg rejects that contradictory pair.
+    try {
+      await runFfmpeg(ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-i', input, '-vf', `select=between(n\\,${start}\\,${end}),setpts=N/${outputRate}/TB`, '-af', `atrim=start=${startSeconds}:end=${endSeconds},asetpts=PTS-STARTPTS`, '-t', duration.toFixed(6), '-map', '0:v:0', '-map', '0:a?', '-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p', '-r', outputRate, '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', '-y', outputPath])
+    } catch (error) {
+      // A failed encode can leave a tiny, unusable MP4 behind. Remove only
+      // that newly requested export so retrying the same save path is safe.
+      await unlink(outputPath).catch(() => undefined)
+      throw error
+    }
     const created = await stat(outputPath).catch(() => null); if (!created?.size) throw new Error('FFmpeg completed without producing the Clip Master export.')
     return { path: outputPath, name: basename(outputPath), url: `minimax-media://local?path=${encodeURIComponent(outputPath)}`, folder, frameCount: end - start + 1, duration }
   })

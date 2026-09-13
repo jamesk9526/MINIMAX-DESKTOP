@@ -175,7 +175,28 @@ export function buildMiniMaxWorkflow(
   // server was launched without latent preview decoding enabled.
   prompt['71'] = { class_type: 'ImageFromBatch', inputs: { image: ['16', 0], batch_index: 0, length: 1 } }
   prompt['72'] = { class_type: 'PreviewImage', inputs: { images: ['71', 0] } }
-  if (options.upscale?.type === 'ltx') {
+  if (options.upscale?.type === 'h3') {
+    // This is a native H3 video-latent upscale: preserve the audio latent,
+    // upscale only H3's 24-channel video latent, then decode the joined result.
+    // It deliberately avoids the lossy H3 VAE decode → pixel upscale → encode loop.
+    prompt['110'] = { class_type: 'LTXVSeparateAVLatent', inputs: { av_latent: ['15', 0] } }
+    prompt['111'] = {
+      class_type: 'MinimaxH3LatentUpscaler3D',
+      inputs: {
+        latent: ['110', 0], model_name: options.upscale.model,
+        mode: 'scale by multiplier', 'mode.scale': 1.5,
+        align: 32, enable_temporal_chunking: true, force_unload: true,
+        device: 'cuda', precision: 'fp16',
+      },
+    }
+    prompt['112'] = { class_type: 'LTXVConcatAVLatent', inputs: { video_latent: ['111', 0], audio_latent: ['110', 1] } }
+    // Keep nodes 16/71 as the first-pass preview branch. The final video is
+    // decoded only from the learned-upscaled latent, after the preview node.
+    prompt['113'] = { class_type: 'VAEDecode', inputs: { samples: ['112', 0], vae: ['3', 0] } }
+    prompt['114'] = { class_type: 'VAEDecodeAudio', inputs: { samples: ['112', 0], vae: ['4', 0] } }
+    prompt['18'] = { class_type: 'CreateVideo', inputs: { images: ['113', 0], audio: ['114', 0], fps: 24, bit_depth: 8, color_space: 'sRGB' } }
+    prompt['19'] = { class_type: 'SaveVideo', inputs: { video: ['18', 0], filename_prefix: `${options.filenamePrefix}_H3_Latent_1_5x`, format: 'auto', codec: 'auto' } }
+  } else if (options.upscale?.type === 'ltx') {
     // MiniMax post-processing intentionally remains non-generative: encode the
     // completed H3 frame sequence into the LTX video latent domain, apply the
     // learned spatial x2 node, decode, then remux the untouched H3 audio.

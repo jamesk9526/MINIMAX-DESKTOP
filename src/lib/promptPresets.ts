@@ -82,6 +82,18 @@ export const promptPresets: PromptPreset[] = [
     ['occlusion','Occlusion Transition','Hide the cut behind a full-frame obstruction.'], ['iris','Iris Transition','Open or close the visible frame through a controlled circular mask.'], ['timelapse','Time-Lapse Transition','Compress environmental change while preserving a fixed visual anchor.'],
     ['speed-ramp','Speed Ramp','Change playback energy smoothly around one motivated action beat.'], ['focus','Focus Transition','Move attention between subjects through a clean motivated focus pull.'],
   ].map(([id,label,description]) => preset('transition', id, label, description, `Transition: ${description} Preserve composition, screen direction, timing, and the intended narrative connection.`)),
+  ...[
+    ['push-past','Push Past Foreground','Move past a near foreground element into the action.'], ['reveal-doorway','Doorway Reveal','Enter or reveal the scene through a doorway or frame.'], ['locked-portrait','Locked Portrait','Hold an intimate portrait composition with no reframing.'], ['tabletop-orbit','Tabletop Orbit','Circle a product or prop at close range with controlled parallax.'], ['focus-rack-near','Rack Focus Near','Shift focus from the background into a near subject.'], ['focus-rack-far','Rack Focus Far','Shift focus from a near object to the background action.'],
+  ].map(([id,label,description]) => preset('camera', id, label, description, `Camera: ${description.toLowerCase()} Keep focus, movement, and perspective physically plausible.`)),
+  ...[
+    ['clean-plate','Clean Plate','Hold an empty environment for compositing or an edit point.'], ['product-hero','Product Hero','Present one object with clear silhouette and surface detail.'], ['silhouette-profile','Silhouette Profile','Use a readable side silhouette against a separated background.'], ['dialogue-coverage','Dialogue Coverage','Keep eyelines, headroom, and screen direction consistent for an edit.'],
+  ].map(([id,label,description]) => preset('shot', id, label, description, `Shot: ${description}. Preserve clean composition and the intended editorial purpose.`)),
+  ...[
+    ['softbox','Softbox Key','Large soft studio source with gentle wrap and controlled shadow.'], ['motivated-window','Motivated Window','Use an off-frame window as a believable directional key.'], ['night-exterior','Night Exterior','Balance practical pools of light with readable shadow detail.'], ['overhead-practical','Overhead Practical','Let a ceiling practical shape the scene with grounded falloff.'],
+  ].map(([id,label,description]) => preset('lighting', id, label, description, `Lighting: ${description}. Maintain motivated sources, stable exposure, and believable shadows.`)),
+  ...[
+    ['breath','Breath and Room Tone','Keep close natural breathing subtle against the room perspective.'], ['rain-interior','Rain on Glass','Place rain, distant traffic, and soft interior room tone behind the action.'], ['market','Market Ambience','Use layered distant voices, movement, and stalls without overpowering dialogue.'], ['club','Club Interior','Use restrained bass spill, crowd texture, and room reflections.'],
+  ].map(([id,label,description]) => preset('audio', id, label, description, `Sound: ${description}. Keep the mix synchronized, natural, and appropriate to the visible space.`)),
 ]
 
 export const promptPresetCategories: Array<{ id: PromptPresetCategory; label: string }> = [

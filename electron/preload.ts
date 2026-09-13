@@ -47,4 +47,5 @@ contextBridge.exposeInMainWorld('minimax', {
   syncMobileCharacters: (characters: unknown[]) => ipcRenderer.invoke('lan:sync-characters', characters),
   rotateLanToken: () => ipcRenderer.invoke('lan:rotate-token'),
   setWindowAlwaysOnTop: (enabled: boolean) => ipcRenderer.invoke('window:set-always-on-top', enabled),
+  openMovieEditor: () => ipcRenderer.invoke('window:open-movie-editor'),
 })

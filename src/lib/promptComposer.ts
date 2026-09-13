@@ -315,9 +315,13 @@ export function composeReferenceInstructions(bindings: MovieReferenceBinding[]) 
       : `${tags} depict the approved ${name} location. Preserve its architecture, layout, materials, lighting, landmarks, atmosphere, and spatial geography.`) + ` ${context}${accuracy}`)
   }
   for (const binding of numbered.filter((item) => item.purpose === 'continuity')) lines.push(`Continue the framing, lighting, pose, screen direction, and motion state shown in <Picture ${binding.number}>.`)
-  for (const binding of numbered.filter((item) => item.purpose === 'generic')) lines.push(binding.file.referenceRetention === 'preserve'
-    ? `Use <Picture ${binding.number}> as ${binding.label.replace(/^Shot reference:\s*/, 'the authoritative visual reference for ')}. Preserve only its assigned role exactly; do not copy unrelated subjects, clothing, objects, or background details.`
-    : `Use <Picture ${binding.number}> as ${binding.label.replace(/^Shot reference:\s*/, 'the visual reference for ')}. Treat it as guidance only and do not copy unrelated details.`)
+  for (const binding of numbered.filter((item) => item.purpose === 'generic')) lines.push(binding.file.openingFrameTreatment === 'reframe'
+    ? `<Picture ${binding.number}> is the visual and spatial opening reference. Preserve its environment, lighting, spatial relationships, and initial subject placement while intentionally changing only the camera viewpoint specified in the detailed description.`
+    : binding.file.openingFrameTreatment === 'arc'
+      ? `<Picture ${binding.number}> defines the opening composition and spatial state. Preserve that opening state, then perform only the requested smooth camera arc after it is established.`
+      : binding.file.referenceRetention === 'preserve'
+        ? `Use <Picture ${binding.number}> as ${binding.label.replace(/^Shot reference:\s*/, 'the authoritative visual reference for ')}. Preserve only its assigned role exactly; do not copy unrelated subjects, clothing, objects, or background details.`
+        : `Use <Picture ${binding.number}> as ${binding.label.replace(/^Shot reference:\s*/, 'the visual reference for ')}. Treat it as guidance only and do not copy unrelated details.`)
   return lines
 }
 

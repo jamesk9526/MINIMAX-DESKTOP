@@ -1,9 +1,9 @@
-export type View = 'create' | 'ltx25' | 'music' | 'zimage' | 'characters' | 'hair' | 'wardrobes' | 'accessories' | 'locations' | 'movie' | 'queue' | 'library' | 'editor' | 'clipmaster' | 'settings'
+export type View = 'create' | 'ltx25' | 'music' | 'zimage' | 'referenceprep' | 'characters' | 'hair' | 'wardrobes' | 'accessories' | 'locations' | 'queue' | 'library' | 'clipmaster' | 'settings'
 export type GenerationMode = 'text' | 'image' | 'frames' | 'reference'
 export type ModelKind = 'diffusion_models' | 'text_encoders' | 'vae' | 'loras' | 'vae_approx' | 'clip_vision'
 export type MediaKind = 'image' | 'video' | 'audio'
-export type UpscaleMode = 'off' | 'ltx' | 'rtx'
-export type Turbo8Profile = 'stable' | 'balanced' | 'motion'
+export type UpscaleMode = 'off' | 'h3' | 'ltx' | 'rtx'
+export type Turbo8Profile = 'stable' | 'balanced' | 'motion' | 'euler-beta'
 export type AttentionBackendPreference = 'automatic' | 'kitchen' | 'sage' | 'native'
 export type AppliedLora = { name: string; strength: number }
 export type ReferencePurpose = 'character' | 'character-angle' | 'detail' | 'hair' | 'wardrobe' | 'accessory' | 'location' | 'continuity' | 'product' | 'style' | 'generic'
@@ -67,8 +67,33 @@ export type AppSettings = {
   generationDefaults: GenerationDefaults
 }
 
-export type ClipItem = { id: string; name: string; source: string; createdAt: number; start?: number; end?: number; duration?: number }
+export type ClipItem = { id: string; name: string; source: string; createdAt: number; start?: number; end?: number; duration?: number; mediaKind?: MediaKind }
 export type ClipProject = { id: string; name: string; createdAt: number; updatedAt: number; media: ClipItem[]; clips: ClipItem[] }
+
+/** Frame-based timing keeps edits stable across save/load and avoids accumulated float drift. */
+export type MovieEditorTrackKind = 'video' | 'audio' | 'image' | 'title' | 'overlay'
+export type MovieEditorTrack = { id: string; name: string; kind: MovieEditorTrackKind; locked?: boolean; hidden?: boolean; muted?: boolean; syncLocked?: boolean }
+export type MovieEditorClip = ClipItem & {
+  trackId: string
+  startFrame: number
+  sourceInFrame: number
+  sourceOutFrame?: number
+  assetId: string
+  generation?: { jobId: string; model?: string; prompt?: string; width?: number; height?: number }
+  transform?: { x: number; y: number; scale: number; rotation: number; opacity: number }
+  audio?: { volume: number; fadeInFrames: number; fadeOutFrames: number; muted: boolean }
+}
+export type MovieEditorProject = {
+  id: string
+  name: string
+  createdAt: number
+  updatedAt: number
+  frameRate: number
+  media: ClipItem[]
+  tracks: MovieEditorTrack[]
+  clips: MovieEditorClip[]
+  markers?: Array<{ id: string; frame: number; label: string; color: 'violet' | 'yellow' | 'red' }>
+}
 
 export type CharacterProject = {
   id: string
@@ -185,6 +210,7 @@ export type ModelFile = {
 export type ReferenceImageType = 'master' | 'face' | 'full-body' | 'three-quarter' | 'profile' | 'back' | 'detail' | 'other'
 export type ReferenceHandoffRole = 'subject' | 'wardrobe' | 'prop' | 'location' | 'composition' | 'lighting-style'
 export type ReferenceRetention = 'preserve' | 'guide'
+export type OpeningFrameTreatment = 'match' | 'reframe' | 'arc'
 
 export type MediaFile = {
   path: string
@@ -198,6 +224,8 @@ export type MediaFile = {
   /** How a standalone image should be described and retained during reference handoff. */
   referenceRole?: ReferenceHandoffRole
   referenceRetention?: ReferenceRetention
+  /** The intentional opening-shot relationship for an extracted video final frame. */
+  openingFrameTreatment?: OpeningFrameTreatment
 }
 
 export type ModelSelection = {
@@ -285,7 +313,7 @@ export type GenerationOptions = {
   refImageSize: 'match' | 'max'
   sigmaShift?: { video: number; audio: number }
   filenamePrefix: string
-  upscale?: { type: 'ltx'; model: string; vae: string } | { type: 'rtx'; model: string }
+  upscale?: { type: 'h3'; model: string } | { type: 'ltx'; model: string; vae: string } | { type: 'rtx'; model: string }
   firstFrame?: string
   lastFrame?: string
   referenceImages: string[]
@@ -437,4 +465,5 @@ export type DesktopApi = {
   syncMobileCharacters(characters: unknown[]): Promise<{ synced: number }>
   rotateLanToken(): Promise<LanStatus>
   setWindowAlwaysOnTop(enabled: boolean): Promise<boolean>
+  openMovieEditor(): Promise<void>
 }
