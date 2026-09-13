@@ -384,6 +384,10 @@ export type GenerationJob = {
   totalSteps?: number
   lastSamplerStepAt?: number
   estimatedSamplerStepMs?: number
+  /** Timestamp when ComfyUI first confirmed that it began executing this prompt. */
+  startedAt?: number
+  /** A small, persisted transcript of meaningful ComfyUI state transitions. */
+  comfyActivity?: Array<{ at: number; level: 'info' | 'success' | 'warning' | 'error'; message: string }>
   queueMissingAt?: number
   queuePosition?: number
   execution?: JobExecutionInfo
